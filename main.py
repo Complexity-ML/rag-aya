@@ -180,17 +180,21 @@ def main():
         gen_model=args.model,
     )
 
-    if args.command == "index":
-        cmd_index(config)
-    elif args.command == "query":
-        if not args.query_text:
-            logger.error("Usage: python main.py query \"your question\"")
-            sys.exit(1)
-        cmd_query(config, args.query_text)
-    elif args.command == "eval":
-        cmd_eval(config)
-    elif args.command == "demo":
-        cmd_demo(config)
+    try:
+        if args.command == "index":
+            cmd_index(config)
+        elif args.command == "query":
+            if not args.query_text:
+                logger.error("Usage: python main.py query \"your question\"")
+                sys.exit(1)
+            cmd_query(config, args.query_text)
+        elif args.command == "eval":
+            cmd_eval(config)
+        elif args.command == "demo":
+            cmd_demo(config)
+    except ValueError as e:
+        logger.error("%s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

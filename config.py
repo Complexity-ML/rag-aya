@@ -34,4 +34,10 @@ class Config:
 
     def validate(self):
         if not self.cohere_api_key:
-            raise ValueError("COHERE_API_KEY not set. Export it or pass via .env")
+            raise ValueError(
+                "COHERE_API_KEY not set.\n\n"
+                "  1. Get your key at: https://dashboard.cohere.com/api-keys\n"
+                "  2. Create a .env file:  cp .env.example .env\n"
+                "  3. Add your key:        COHERE_API_KEY=your_key_here\n\n"
+                "  Or export directly:      export COHERE_API_KEY=your_key_here"
+            )
