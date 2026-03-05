@@ -1,0 +1,6 @@
+aiohttp>=3.9
+cohere>=5.0
+numpy
+python-dotenv
+datasets
+ragas
