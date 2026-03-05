@@ -12,6 +12,9 @@ from typing import List, Tuple, Optional
 
 from chunker import Chunk
 from embedder import CohereEmbedder
+from logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class Retriever:
@@ -31,7 +34,7 @@ class Retriever:
         else:
             self.chunks.extend(chunks)
             self.embeddings = np.vstack([self.embeddings, new_embeddings])
-        print(f"  Indexed {len(chunks)} chunks (total: {len(self.chunks)})")
+        logger.info("Indexed %d chunks (total: %d)", len(chunks), len(self.chunks))
 
     def search(self, query: str, k: int = 5) -> List[Tuple[Chunk, float]]:
         """Search for top-k most similar chunks."""
@@ -69,7 +72,7 @@ class Retriever:
         ]
         with open(os.path.join(path, "chunks.json"), "w", encoding="utf-8") as f:
             json.dump(chunks_data, f, ensure_ascii=False)
-        print(f"  Saved index: {len(self.chunks)} chunks → {path}")
+        logger.info("Saved index: %d chunks -> %s", len(self.chunks), path)
 
     def load(self, path: str):
         """Load index from disk."""
@@ -80,7 +83,7 @@ class Retriever:
             Chunk(text=c["text"], doc_id=c["doc_id"], chunk_idx=c["chunk_idx"], language=c.get("language", "en"))
             for c in chunks_data
         ]
-        print(f"  Loaded index: {len(self.chunks)} chunks from {path}")
+        logger.info("Loaded index: %d chunks from %s", len(self.chunks), path)
 
     @property
     def stats(self) -> dict:

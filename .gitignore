@@ -18,3 +18,5 @@ index/
 .vscode/
 .idea/
 *.swp
+docs*
+.claude/

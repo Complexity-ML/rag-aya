@@ -30,6 +30,9 @@ from embedder import CohereEmbedder
 from retriever import Retriever
 from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
+from logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class RagAyaServer:
@@ -271,9 +274,9 @@ def main():
     server = RagAyaServer(config)
     app = server.create_app()
 
-    print(f"RAG-Aya server starting on {args.host}:{args.port}")
-    print(f"  Model: {config.gen_model}")
-    print(f"  Index: {config.index_path} ({len(server.retriever.chunks)} chunks)")
+    logger.info("RAG-Aya server starting on %s:%d", args.host, args.port)
+    logger.info("Model: %s", config.gen_model)
+    logger.info("Index: %s (%d chunks)", config.index_path, len(server.retriever.chunks))
     web.run_app(app, host=args.host, port=args.port)
 
 

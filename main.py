@@ -23,6 +23,9 @@ from embedder import CohereEmbedder
 from retriever import Retriever
 from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
+from logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def build_pipeline(config: Config):
@@ -40,19 +43,19 @@ def cmd_index(config: Config):
 
     embedder, retriever, _ = build_pipeline(config)
 
-    print("Loading documents...")
+    logger.info("Loading documents...")
     documents = load_wikipedia(config.languages, max_per_lang=config.max_documents)
 
-    print("Chunking...")
+    logger.info("Chunking...")
     chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
-    print(f"  {len(chunks)} chunks created")
+    logger.info("%d chunks created", len(chunks))
 
-    print("Embedding + indexing...")
+    logger.info("Embedding + indexing...")
     retriever.index(chunks)
 
-    print("Saving index...")
+    logger.info("Saving index...")
     retriever.save(config.index_path)
-    print("Done!")
+    logger.info("Done!")
 
 
 def cmd_query(config: Config, query: str):
@@ -62,29 +65,28 @@ def cmd_query(config: Config, query: str):
     if os.path.exists(os.path.join(config.index_path, "chunks.json")):
         retriever.load(config.index_path)
     else:
-        print("No index found. Run 'python main.py index' first.")
+        logger.error("No index found. Run 'python main.py index' first.")
         return
 
-    print(f"\nQuery: {query}")
-    print("-" * 60)
+    logger.info("Query: %s", query)
 
     context = retriever.get_context(query, k=config.top_k)
     if not context:
-        print("No relevant documents found.")
+        logger.warning("No relevant documents found.")
         return
 
-    print(f"\nRetrieved {config.top_k} chunks:")
+    logger.info("Retrieved %d chunks:", config.top_k)
     for chunk, score in retriever.search(query, k=config.top_k):
-        print(f"  [{chunk.language}] {score:.3f} — {chunk.text[:80]}...")
+        logger.info("  [%s] %.3f -- %s...", chunk.language, score, chunk.text[:80])
 
-    print("\nGenerating answer...")
+    logger.info("Generating answer...")
     result = generator.generate(
         query=query,
         context=context,
         max_tokens=config.max_tokens,
         temperature=config.temperature,
     )
-    print(f"\nAnswer ({result.model}):")
+    logger.info("Answer (%s):", result.model)
     print(result.answer)
 
 
@@ -95,7 +97,7 @@ def cmd_eval(config: Config):
     if os.path.exists(os.path.join(config.index_path, "chunks.json")):
         retriever.load(config.index_path)
     else:
-        print("No index found. Run 'python main.py index' first.")
+        logger.error("No index found. Run 'python main.py index' first.")
         return
 
     test_queries = [
@@ -108,33 +110,32 @@ def cmd_eval(config: Config):
 
     samples = []
     for query, lang in test_queries:
-        print(f"\n  [{lang}] {query}")
+        logger.info("[%s] %s", lang, query)
         context = retriever.get_context(query, k=config.top_k)
         contexts_list = [c.strip() for c in context.split("\n\n") if c.strip()]
         result = generator.generate(query, context, language=lang)
-        print(f"    -> {result.answer[:100]}...")
+        logger.info("  -> %s...", result.answer[:100])
         samples.append(EvalSample(
             question=query,
             contexts=contexts_list,
             answer=result.answer,
         ))
 
-    print("\n" + "=" * 60)
-    print("Evaluation results (simple):")
+    logger.info("Evaluation results (simple):")
     stats = evaluate_simple(samples)
     for k, v in stats.items():
-        print(f"  {k}: {v}")
+        logger.info("  %s: %s", k, v)
 
     try:
         from evaluate import evaluate_ragas
-        print("\nRAGAS evaluation:")
+        logger.info("RAGAS evaluation:")
         ragas_results = evaluate_ragas(samples)
         for k, v in ragas_results.items():
-            print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+            logger.info("  %s: %s", k, f"{v:.4f}" if isinstance(v, float) else v)
     except ImportError:
-        print("\n  RAGAS not installed. Run: pip install ragas")
+        logger.warning("RAGAS not installed. Run: pip install ragas")
     except Exception as e:
-        print(f"\n  RAGAS error: {e}")
+        logger.error("RAGAS error: %s", e)
 
 
 def cmd_demo(config: Config):
@@ -144,10 +145,10 @@ def cmd_demo(config: Config):
     if os.path.exists(os.path.join(config.index_path, "chunks.json")):
         retriever.load(config.index_path)
     else:
-        print("No index found. Run 'python main.py index' first.")
+        logger.error("No index found. Run 'python main.py index' first.")
         return
 
-    print(f"RAG-Aya Demo | {retriever.stats['num_chunks']} chunks indexed")
+    logger.info("RAG-Aya Demo | %d chunks indexed", retriever.stats["num_chunks"])
     print("Type your question (or 'quit' to exit):\n")
 
     while True:
@@ -183,7 +184,7 @@ def main():
         cmd_index(config)
     elif args.command == "query":
         if not args.query_text:
-            print("Usage: python main.py query \"your question\"")
+            logger.error("Usage: python main.py query \"your question\"")
             sys.exit(1)
         cmd_query(config, args.query_text)
     elif args.command == "eval":

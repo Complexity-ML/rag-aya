@@ -6,6 +6,10 @@ Load scientific/Wikipedia documents in FR and EN.
 
 from typing import List
 
+from logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def load_wikipedia(languages: List[str] = None, max_per_lang: int = 50) -> List[dict]:
     """Load Wikipedia articles via HuggingFace datasets."""
@@ -16,7 +20,7 @@ def load_wikipedia(languages: List[str] = None, max_per_lang: int = 50) -> List[
 
     documents = []
     for lang in languages:
-        print(f"  Loading Wikipedia ({lang})...")
+        logger.info("Loading Wikipedia (%s)...", lang)
         config = f"20220301.{lang}"
         ds = load_dataset("wikipedia", config, split=f"train[:{max_per_lang}]", trust_remote_code=True)
         for i, row in enumerate(ds):
@@ -29,9 +33,10 @@ def load_wikipedia(languages: List[str] = None, max_per_lang: int = 50) -> List[
                     "title": title,
                     "language": lang,
                 })
-        print(f"    Loaded {len([d for d in documents if d['language'] == lang])} articles ({lang})")
+        count = len([d for d in documents if d["language"] == lang])
+        logger.info("Loaded %d articles (%s)", count, lang)
 
-    print(f"  Total documents: {len(documents)}")
+    logger.info("Total documents: %d", len(documents))
     return documents
 
 
