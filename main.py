@@ -30,10 +30,17 @@ logger = init_logger(__name__)
 
 def build_pipeline(config: Config):
     """Build embedder + retriever + generator."""
-    config.validate()
     embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
     retriever = Retriever(embedder)
-    generator = AyaGenerator(config.cohere_api_key, config.gen_model)
+
+    if config.gguf_path:
+        from generator import GGUFGenerator
+        config.validate(require_cohere=False)
+        generator = GGUFGenerator(config.gguf_path, config.n_ctx, config.n_gpu_layers)
+    else:
+        config.validate(require_cohere=True)
+        generator = AyaGenerator(config.cohere_api_key, config.gen_model)
+
     return embedder, retriever, generator
 
 
@@ -56,6 +63,43 @@ def cmd_index(config: Config):
     logger.info("Saving index...")
     retriever.save(config.index_path)
     logger.info("Done!")
+
+
+def cmd_index_wmt(config: Config, lang_pair: str, dataset: str = None):
+    """Load WMT25 data, chunk, embed, save index."""
+    from data_loader import load_wmt_dataset, load_wmt_recipe
+
+    embedder, retriever, _ = build_pipeline(config)
+
+    if dataset:
+        logger.info("Loading WMT dataset: %s (%s)...", dataset, lang_pair)
+        documents = load_wmt_dataset(
+            dataset, lang_pair,
+            cache_dir=config.wmt_cache_dir,
+            max_lines=config.wmt_max_lines,
+        )
+    else:
+        logger.info("Loading WMT recipe: %s...", lang_pair)
+        documents = load_wmt_recipe(
+            lang_pair,
+            cache_dir=config.wmt_cache_dir,
+            max_lines=config.wmt_max_lines,
+        )
+
+    if not documents:
+        logger.error("No documents loaded.")
+        return
+
+    logger.info("Chunking %d documents...", len(documents))
+    chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
+    logger.info("%d chunks created", len(chunks))
+
+    logger.info("Embedding + indexing...")
+    retriever.index(chunks)
+
+    logger.info("Saving index...")
+    retriever.save(config.index_path)
+    logger.info("Done! Indexed %d chunks from WMT25 %s", len(chunks), lang_pair)
 
 
 def cmd_query(config: Config, query: str):
@@ -163,13 +207,21 @@ def cmd_demo(config: Config):
 
 def main():
     parser = argparse.ArgumentParser(description="RAG-Aya Pipeline")
-    parser.add_argument("command", choices=["index", "query", "eval", "demo"])
+    parser.add_argument("command", choices=["index", "index-wmt", "query", "eval", "demo"])
     parser.add_argument("query_text", nargs="?", default="")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-docs", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
+    # GGUF options
+    parser.add_argument("--gguf", default="", help="Path to GGUF model file")
+    parser.add_argument("--n-ctx", type=int, default=2048)
+    parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    # WMT options
+    parser.add_argument("--lang-pair", default="eng-ara", help="WMT lang pair (e.g. eng-ara, eng-bho)")
+    parser.add_argument("--wmt-dataset", default=None, help="Small dataset: news_commentary, ted_talks, wikimatrix")
+    parser.add_argument("--wmt-max-lines", type=int, default=500)
     args = parser.parse_args()
 
     config = Config(
@@ -178,11 +230,17 @@ def main():
         chunk_size=args.chunk_size,
         index_path=args.index_path,
         gen_model=args.model,
+        gguf_path=args.gguf,
+        n_ctx=args.n_ctx,
+        n_gpu_layers=args.n_gpu_layers,
+        wmt_max_lines=args.wmt_max_lines,
     )
 
     try:
         if args.command == "index":
             cmd_index(config)
+        elif args.command == "index-wmt":
+            cmd_index_wmt(config, args.lang_pair, args.wmt_dataset)
         elif args.command == "query":
             if not args.query_text:
                 logger.error("Usage: python main.py query \"your question\"")

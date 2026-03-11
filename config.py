@@ -28,12 +28,21 @@ class Config:
     max_tokens: int = 512
     temperature: float = 0.3
 
+    # GGUF (local model)
+    gguf_path: str = ""
+    n_ctx: int = 2048
+    n_gpu_layers: int = -1
+
     # Data
     languages: List[str] = field(default_factory=lambda: ["en", "fr"])
     max_documents: int = 100
 
-    def validate(self):
-        if not self.cohere_api_key:
+    # WMT
+    wmt_cache_dir: str = "wmt_data"
+    wmt_max_lines: int = 500
+
+    def validate(self, require_cohere: bool = True):
+        if require_cohere and not self.cohere_api_key:
             raise ValueError(
                 "COHERE_API_KEY not set.\n\n"
                 "  1. Get your key at: https://dashboard.cohere.com/api-keys\n"

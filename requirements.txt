@@ -4,3 +4,5 @@ numpy
 python-dotenv
 datasets
 ragas
+mtdata==0.4.3
+llama-cpp-python
