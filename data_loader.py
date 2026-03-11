@@ -5,6 +5,7 @@ Load documents from WMT25 parallel data and local files.
 """
 
 import os
+import sys
 import subprocess
 import glob as globlib
 from typing import List, Optional
@@ -36,10 +37,15 @@ WMT_SMALL_DATASETS = {
 }
 
 
+def _mtdata_cmd():
+    """Return the mtdata command prefix (handles Windows PATH issues)."""
+    return [sys.executable, "-m", "mtdata"]
+
+
 def _ensure_mtdata():
     """Check mtdata is installed."""
     try:
-        subprocess.run(["mtdata", "--version"], capture_output=True, check=True)
+        subprocess.run(_mtdata_cmd() + ["--version"], capture_output=True, check=True)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         logger.error("mtdata not installed. Run: pip install mtdata==0.4.3")
@@ -52,10 +58,10 @@ def _ensure_wmt_recipes(cache_dir: str):
     if not os.path.exists(recipe_path):
         os.makedirs(cache_dir, exist_ok=True)
         logger.info("Downloading WMT25 recipes config...")
-        subprocess.run(
-            ["wget", "-q", "-O", recipe_path,
-             "https://www.statmt.org/wmt25/mtdata/mtdata.recipes.wmt25-constrained.yml"],
-            check=True,
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://www.statmt.org/wmt25/mtdata/mtdata.recipes.wmt25-constrained.yml",
+            recipe_path,
         )
     return recipe_path
 
@@ -86,7 +92,7 @@ def load_wmt_recipe(
     if not os.path.exists(out_dir):
         logger.info("Downloading WMT25 recipe: %s ...", recipe_id)
         subprocess.run(
-            ["mtdata", "get-recipe", "-ri", recipe_id, "-o", out_dir, "--compress", "--no-merge"],
+            _mtdata_cmd() + ["get-recipe", "-ri", recipe_id, "-o", out_dir, "--compress", "--no-merge"],
             cwd=cache_dir,
             check=True,
         )
@@ -120,7 +126,7 @@ def load_wmt_dataset(
 
     try:
         result = subprocess.run(
-            ["mtdata", "echo", dataset_id],
+            _mtdata_cmd() + ["echo", dataset_id],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
