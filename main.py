@@ -1,13 +1,13 @@
 """
 RAG-Aya :: Main Pipeline
 
-Full RAG pipeline: load data, chunk, embed, index, query, evaluate.
+Full RAG pipeline: load WMT data, chunk, embed, index, query, evaluate.
 
 Usage:
-    python main.py index                     # Load data + build index
-    python main.py query "your question"     # Query the index
-    python main.py eval                      # Run RAGAS evaluation
-    python main.py demo                      # Interactive demo
+    python main.py index --local --lang-pair eng-fra --wmt-dataset news_commentary
+    python main.py query "your question" --local --gguf ../tiny-aya-global-q4_k_m.gguf
+    python main.py eval  --local --gguf ../tiny-aya-global-q4_k_m.gguf
+    python main.py demo  --local --gguf ../tiny-aya-global-q4_k_m.gguf
 """
 
 import argparse
@@ -49,32 +49,20 @@ def build_pipeline(config: Config):
     return embedder, retriever, generator
 
 
-def cmd_index(config: Config):
-    """Load data, chunk, embed, save index."""
-    from data_loader import load_wikipedia
-
-    embedder, retriever, _ = build_pipeline(config)
-
-    logger.info("Loading documents...")
-    documents = load_wikipedia(config.languages, max_per_lang=config.max_documents)
-
-    logger.info("Chunking...")
-    chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
-    logger.info("%d chunks created", len(chunks))
-
-    logger.info("Embedding + indexing...")
-    retriever.index(chunks)
-
-    logger.info("Saving index...")
-    retriever.save(config.index_path)
-    logger.info("Done!")
-
-
-def cmd_index_wmt(config: Config, lang_pair: str, dataset: str = None):
+def cmd_index(config: Config, lang_pair: str, dataset: str = None):
     """Load WMT25 data, chunk, embed, save index."""
     from data_loader import load_wmt_dataset, load_wmt_recipe
 
-    embedder, retriever, _ = build_pipeline(config)
+    # Only need embedder + retriever for indexing (no generator)
+    if config.local_embedder:
+        from embedder import LocalEmbedder
+        embedder = LocalEmbedder(config.local_embed_model)
+    else:
+        from embedder import CohereEmbedder
+        config.validate(require_cohere=True)
+        embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
+
+    retriever = Retriever(embedder)
 
     if dataset:
         logger.info("Loading WMT dataset: %s (%s)...", dataset, lang_pair)
@@ -212,7 +200,7 @@ def cmd_demo(config: Config):
 
 def main():
     parser = argparse.ArgumentParser(description="RAG-Aya Pipeline")
-    parser.add_argument("command", choices=["index", "index-wmt", "query", "eval", "demo"])
+    parser.add_argument("command", choices=["index", "query", "eval", "demo"])
     parser.add_argument("query_text", nargs="?", default="")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--max-docs", type=int, default=50)
@@ -246,9 +234,7 @@ def main():
 
     try:
         if args.command == "index":
-            cmd_index(config)
-        elif args.command == "index-wmt":
-            cmd_index_wmt(config, args.lang_pair, args.wmt_dataset)
+            cmd_index(config, args.lang_pair, args.wmt_dataset)
         elif args.command == "query":
             if not args.query_text:
                 logger.error("Usage: python main.py query \"your question\"")

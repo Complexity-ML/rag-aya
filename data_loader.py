@@ -1,7 +1,7 @@
 """
 RAG-Aya :: Data Loader
 
-Load documents from Wikipedia, WMT25 parallel data, and local files.
+Load documents from WMT25 parallel data and local files.
 """
 
 import os
@@ -12,35 +12,6 @@ from typing import List, Optional
 from logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def load_wikipedia(languages: List[str] = None, max_per_lang: int = 50) -> List[dict]:
-    """Load Wikipedia articles via HuggingFace datasets."""
-    from datasets import load_dataset
-
-    if languages is None:
-        languages = ["en", "fr"]
-
-    documents = []
-    for lang in languages:
-        logger.info("Loading Wikipedia (%s)...", lang)
-        config = f"20220301.{lang}"
-        ds = load_dataset("wikipedia", config, split=f"train[:{max_per_lang}]", trust_remote_code=True)
-        for i, row in enumerate(ds):
-            text = row.get("text", "")
-            title = row.get("title", f"wiki_{lang}_{i}")
-            if len(text) > 100:
-                documents.append({
-                    "id": f"wiki_{lang}_{i}_{title[:30]}",
-                    "text": text,
-                    "title": title,
-                    "language": lang,
-                })
-        count = len([d for d in documents if d["language"] == lang])
-        logger.info("Loaded %d articles (%s)", count, lang)
-
-    logger.info("Total documents: %d", len(documents))
-    return documents
 
 
 # ── WMT25 datasets via mtdata ──────────────────────────────────────
