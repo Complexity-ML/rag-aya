@@ -217,8 +217,14 @@ class AyaEngineGenerator:
         )
         resp = urllib.request.urlopen(req, timeout=300)
         try:
-            for line in resp:
-                line = line.decode("utf-8").strip()
+            while True:
+                try:
+                    raw = resp.readline()
+                except (ConnectionError, OSError):
+                    break
+                if not raw:
+                    break
+                line = raw.decode("utf-8").strip()
                 if line == "data: [DONE]":
                     break
                 if line.startswith("data: "):
@@ -230,7 +236,10 @@ class AyaEngineGenerator:
                     except json.JSONDecodeError:
                         continue
         finally:
-            resp.close()
+            try:
+                resp.close()
+            except (ConnectionError, OSError):
+                pass
 
     def generate_batch(
         self,

@@ -616,6 +616,7 @@ int main(int argc, char **argv) {
             float temperature = json_get_float(body, "temperature", 0.7f);
             int top_k = json_get_int(body, "top_k", 40);
             int stream = json_get_int(body, "stream", 0);
+            float rep_penalty = json_get_float(body, "repetition_penalty", 1.2f);
 
             printf("Generate: \"%s\" (max=%d, temp=%.2f, topk=%d)\n",
                    prompt, max_tokens, temperature, top_k);
@@ -653,15 +654,30 @@ int main(int argc, char **argv) {
                 pos++;
             }
 
+            /* Repetition penalty: track generated token IDs */
+            int *gen_ids = malloc(max_tokens * sizeof(int));
+            int gen_count = 0;
+
             if (stream) {
                 send_sse_start(client);
                 for (int t = 0; t < max_tokens; t++) {
+                    /* Apply repetition penalty to already-generated tokens */
+                    if (rep_penalty != 1.0f) {
+                        for (int g = 0; g < gen_count; g++) {
+                            int id = gen_ids[g];
+                            if (logits[id] > 0) logits[id] /= rep_penalty;
+                            else                 logits[id] *= rep_penalty;
+                        }
+                    }
+
                     int next = (temperature <= 0)
                         ? argmax_fn(logits, model->vocab_size)
                         : sample_topk(logits, model->vocab_size, top_k, temperature);
 
                     /* Stop on EOS or special control tokens */
                     if (next == tk->eos_id || next == 3 || next == 6) break;
+                    gen_ids[gen_count++] = next;
+
                     /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
                     const char *tok_text = tokenizer_decode(tk, next);
                     if (next <= 9 || (tok_text[0] == '<' && tok_text[1] == '|')) {
@@ -682,11 +698,21 @@ int main(int argc, char **argv) {
                 int resp_len = 0;
 
                 for (int t = 0; t < max_tokens; t++) {
+                    /* Apply repetition penalty to already-generated tokens */
+                    if (rep_penalty != 1.0f) {
+                        for (int g = 0; g < gen_count; g++) {
+                            int id = gen_ids[g];
+                            if (logits[id] > 0) logits[id] /= rep_penalty;
+                            else                 logits[id] *= rep_penalty;
+                        }
+                    }
+
                     int next = (temperature <= 0)
                         ? argmax_fn(logits, model->vocab_size)
                         : sample_topk(logits, model->vocab_size, top_k, temperature);
 
                     if (next == tk->eos_id || next == 3 || next == 6) break;
+                    gen_ids[gen_count++] = next;
                     if (next <= 9) { free(logits); logits = model_forward(model, cache, next, pos); pos++; continue; }
 
                     char decoded[256];
@@ -724,6 +750,7 @@ int main(int argc, char **argv) {
 
             if (logits) free(logits);
             free(input_ids);
+            free(gen_ids);
             printf("  Generated %d tokens\n", pos - n_tokens);
             fflush(stdout);
 

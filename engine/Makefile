@@ -1,7 +1,7 @@
 CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -std=c11 -Isrc
 LDFLAGS = -lm
-SRC     = src/main.c src/gguf.c src/model.c
+SRC     = main.c gguf.c model.c
 TARGET  = aya-server
 
 # Windows-specific

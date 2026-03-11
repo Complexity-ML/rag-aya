@@ -258,6 +258,9 @@ def main():
             cmd_eval(config)
         elif args.command == "demo":
             cmd_demo(config)
+    except KeyboardInterrupt:
+        print("\n")
+        sys.exit(0)
     except ValueError as e:
         logger.error("%s", e)
         sys.exit(1)
