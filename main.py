@@ -19,7 +19,6 @@ load_dotenv()
 
 from config import Config
 from chunker import chunk_documents
-from embedder import CohereEmbedder
 from retriever import Retriever
 from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
@@ -30,13 +29,19 @@ logger = init_logger(__name__)
 
 def build_pipeline(config: Config):
     """Build embedder + retriever + generator."""
-    embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
+    if config.local_embedder:
+        from embedder import LocalEmbedder
+        embedder = LocalEmbedder(config.local_embed_model)
+    else:
+        from embedder import CohereEmbedder
+        embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
+
     retriever = Retriever(embedder)
 
     if config.gguf_path:
-        from generator import GGUFGenerator
-        config.validate(require_cohere=False)
-        generator = GGUFGenerator(config.gguf_path, config.n_ctx, config.n_gpu_layers)
+        from generator import AyaEngineGenerator
+        config.validate(require_cohere=not config.local_embedder)
+        generator = AyaEngineGenerator(config.gguf_path, port=config.engine_port)
     else:
         config.validate(require_cohere=True)
         generator = AyaGenerator(config.cohere_api_key, config.gen_model)
@@ -214,10 +219,12 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
-    # GGUF options
+    # Local mode
+    parser.add_argument("--local", action="store_true", help="Use local embedder + GGUF (no API needed)")
+    parser.add_argument("--local-embed-model", default="paraphrase-multilingual-MiniLM-L12-v2")
+    # GGUF options (uses aya-offline engine)
     parser.add_argument("--gguf", default="", help="Path to GGUF model file")
-    parser.add_argument("--n-ctx", type=int, default=2048)
-    parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    parser.add_argument("--engine-port", type=int, default=8089, help="Aya engine server port")
     # WMT options
     parser.add_argument("--lang-pair", default="eng-ara", help="WMT lang pair (e.g. eng-ara, eng-bho)")
     parser.add_argument("--wmt-dataset", default=None, help="Small dataset: news_commentary, ted_talks, wikimatrix")
@@ -231,9 +238,10 @@ def main():
         index_path=args.index_path,
         gen_model=args.model,
         gguf_path=args.gguf,
-        n_ctx=args.n_ctx,
-        n_gpu_layers=args.n_gpu_layers,
+        engine_port=args.engine_port,
         wmt_max_lines=args.wmt_max_lines,
+        local_embedder=args.local,
+        local_embed_model=args.local_embed_model,
     )
 
     try:

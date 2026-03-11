@@ -3,9 +3,14 @@ RAG-Aya :: Generator
 
 Supports two backends:
   - Cohere API (Aya 23)
-  - Local GGUF via llama-cpp-python (Tiny Aya)
+  - Aya Engine (custom C inference server from aya-offline)
 """
 
+import json
+import subprocess
+import time
+import urllib.request
+import urllib.error
 from typing import List, Optional
 from dataclasses import dataclass
 
@@ -80,21 +85,60 @@ class AyaGenerator:
         return results
 
 
-class GGUFGenerator:
-    """Local GGUF backend via llama-cpp-python."""
+class AyaEngineGenerator:
+    """Local backend via aya-offline C inference server."""
 
-    def __init__(self, model_path: str, n_ctx: int = 2048, n_gpu_layers: int = -1):
-        from llama_cpp import Llama
-        logger.info("Loading GGUF model: %s", model_path)
-        self.llm = Llama(
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
+    def __init__(self, gguf_path: str, engine_dir: str = "", port: int = 8089):
+        import os
+        self.gguf_path = os.path.abspath(gguf_path)
+        self.port = port
+        self.url = f"http://localhost:{port}"
+        self.model = os.path.basename(gguf_path)
+        self._process = None
+
+        # Find the engine executable
+        if not engine_dir:
+            engine_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine")
+        self._exe = None
+        for name in ["aya-server.exe", "aya_server.exe", "aya-server"]:
+            path = os.path.join(engine_dir, name)
+            if os.path.exists(path):
+                self._exe = path
+                break
+        if not self._exe:
+            raise FileNotFoundError(f"aya-server not found in {engine_dir}")
+
+        self._start_server()
+
+    def _start_server(self):
+        """Start the aya-server process if not already running."""
+        if self._is_running():
+            logger.info("Aya engine already running on port %d", self.port)
+            return
+
+        logger.info("Starting aya engine: %s (port %d)", self._exe, self.port)
+        self._process = subprocess.Popen(
+            [self._exe, self.gguf_path, str(self.port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
-        self.model_path = model_path
-        self.model = model_path.split("/")[-1].split("\\")[-1]
-        logger.info("GGUF model loaded: %s", self.model)
+
+        # Wait for server to be ready
+        for _ in range(120):  # up to 60s for model loading
+            if self._is_running():
+                logger.info("Aya engine ready on port %d", self.port)
+                return
+            time.sleep(0.5)
+
+        raise RuntimeError("Aya engine failed to start within 60s")
+
+    def _is_running(self) -> bool:
+        try:
+            req = urllib.request.Request(f"{self.url}/health")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, ConnectionError, OSError):
+            return False
 
     def generate(
         self,
@@ -104,7 +148,7 @@ class GGUFGenerator:
         temperature: float = 0.3,
         language: Optional[str] = None,
     ) -> GenerationResult:
-        """Generate an answer using local GGUF model with RAG context."""
+        """Generate an answer via the aya engine server."""
 
         lang_hint = f" Respond in {language}." if language else ""
         prompt = (
@@ -114,14 +158,22 @@ class GGUFGenerator:
             f"Answer:"
         )
 
-        output = self.llm(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["Question:", "\n\n\n"],
-        )
+        payload = json.dumps({
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_k": 40,
+        }).encode()
 
-        answer = output["choices"][0]["text"].strip()
+        req = urllib.request.Request(
+            f"{self.url}/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode())
+
+        answer = result.get("text", "").strip()
 
         return GenerationResult(
             answer=answer,
@@ -137,9 +189,12 @@ class GGUFGenerator:
         max_tokens: int = 512,
         temperature: float = 0.3,
     ) -> List[GenerationResult]:
-        """Generate answers for multiple queries."""
         results = []
         for query, context in zip(queries, contexts):
             result = self.generate(query, context, max_tokens=max_tokens, temperature=temperature)
             results.append(result)
         return results
+
+    def __del__(self):
+        if self._process and self._process.poll() is None:
+            self._process.terminate()

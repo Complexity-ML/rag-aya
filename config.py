@@ -28,10 +28,13 @@ class Config:
     max_tokens: int = 512
     temperature: float = 0.3
 
-    # GGUF (local model)
+    # Local model (aya-offline engine)
     gguf_path: str = ""
-    n_ctx: int = 2048
-    n_gpu_layers: int = -1
+    engine_port: int = 8089
+
+    # Local embedder
+    local_embedder: bool = False
+    local_embed_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
 
     # Data
     languages: List[str] = field(default_factory=lambda: ["en", "fr"])
