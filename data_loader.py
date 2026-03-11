@@ -129,8 +129,8 @@ def load_wmt_dataset(
             _mtdata_cmd() + ["echo", dataset_id],
             capture_output=True, text=True, timeout=120,
         )
-        if result.returncode != 0:
-            logger.error("mtdata echo failed: %s", result.stderr[:200])
+        if not result.stdout.strip():
+            logger.error("mtdata echo returned no data: %s", result.stderr[:200])
             return []
     except subprocess.TimeoutExpired:
         logger.error("mtdata echo timed out for %s", dataset_id)
