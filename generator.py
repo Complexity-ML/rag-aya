@@ -182,6 +182,56 @@ class AyaEngineGenerator:
             model=self.model,
         )
 
+    def _build_prompt(self, query: str, context: str, language: Optional[str] = None) -> str:
+        lang_hint = f" Respond in {language}." if language else ""
+        return (
+            f"You are a helpful multilingual research assistant.{lang_hint}\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            f"Answer:"
+        )
+
+    def generate_stream(
+        self,
+        query: str,
+        context: str,
+        max_tokens: int = 512,
+        temperature: float = 0.3,
+        language: Optional[str] = None,
+    ):
+        """Stream tokens via SSE. Yields token strings."""
+        prompt = self._build_prompt(query, context, language)
+
+        payload = json.dumps({
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_k": 40,
+            "stream": 1,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{self.url}/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = urllib.request.urlopen(req, timeout=300)
+        try:
+            for line in resp:
+                line = line.decode("utf-8").strip()
+                if line == "data: [DONE]":
+                    break
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        token = data.get("token", "")
+                        if token:
+                            yield token
+                    except json.JSONDecodeError:
+                        continue
+        finally:
+            resp.close()
+
     def generate_batch(
         self,
         queries: List[str],

@@ -117,14 +117,22 @@ def cmd_query(config: Config, query: str):
         logger.info("  [%s] %.3f -- %s...", chunk.language, score, chunk.text[:80])
 
     logger.info("Generating answer...")
-    result = generator.generate(
-        query=query,
-        context=context,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-    )
-    logger.info("Answer (%s):", result.model)
-    print(result.answer)
+    if hasattr(generator, 'generate_stream'):
+        print()
+        full_answer = ""
+        for token in generator.generate_stream(
+            query=query, context=context,
+            max_tokens=config.max_tokens, temperature=config.temperature,
+        ):
+            print(token, end="", flush=True)
+            full_answer += token
+        print("\n")
+    else:
+        result = generator.generate(
+            query=query, context=context,
+            max_tokens=config.max_tokens, temperature=config.temperature,
+        )
+        print(result.answer)
 
 
 def cmd_eval(config: Config):
@@ -194,8 +202,14 @@ def cmd_demo(config: Config):
             break
 
         context = retriever.get_context(query, k=config.top_k)
-        result = generator.generate(query, context, max_tokens=config.max_tokens)
-        print(f"\n{result.answer}\n")
+        if hasattr(generator, 'generate_stream'):
+            print()
+            for token in generator.generate_stream(query, context, max_tokens=config.max_tokens):
+                print(token, end="", flush=True)
+            print("\n")
+        else:
+            result = generator.generate(query, context, max_tokens=config.max_tokens)
+            print(f"\n{result.answer}\n")
 
 
 def main():
