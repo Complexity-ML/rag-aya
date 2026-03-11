@@ -14,6 +14,16 @@ build/
 # Index data
 index/
 
+# Engine binaries
+engine/*.exe
+engine/*.dll
+
+# WMT data cache
+wmt_data/
+
+# GGUF models
+*.gguf
+
 # IDE
 .vscode/
 .idea/
