@@ -307,16 +307,27 @@ static int sample_topk(const float *logits, int vocab_size,
     return result;
 }
 
-static int sample_topp(const float *logits, int vocab_size,
-                        float top_p, float temperature) {
-    /* Sort all logits descending (partial sort up to cumulative p) */
-    int cap = vocab_size < 1024 ? vocab_size : 1024;
+/* Sampling parameters */
+typedef struct {
+    int   top_k;
+    float top_p;
+    float min_p;
+    float temperature;
+} sample_params_t;
+
+static int sample_advanced(const float *logits, int vocab_size,
+                            sample_params_t sp) {
+    /* Step 1: find top-K candidates (upper bound for all filters) */
+    int cap = sp.top_k > 0 ? sp.top_k : 256;
+    if (cap > vocab_size) cap = vocab_size;
+    /* Use larger pool when top-p is active */
+    if (sp.top_p > 0.0f && sp.top_p < 1.0f && cap < 1024)
+        cap = vocab_size < 1024 ? vocab_size : 1024;
+
     int *indices = malloc(cap * sizeof(int));
     float *vals  = malloc(cap * sizeof(float));
-
     for (int i = 0; i < cap; i++) { indices[i] = -1; vals[i] = -1e30f; }
 
-    /* Find top-cap candidates */
     for (int v = 0; v < vocab_size; v++) {
         float val = logits[v];
         if (val > vals[cap - 1]) {
@@ -329,34 +340,49 @@ static int sample_topp(const float *logits, int vocab_size,
         }
     }
 
-    /* Softmax with temperature */
+    /* Step 2: softmax with temperature */
     float max_val = vals[0];
     float sum = 0.0f;
     int count = 0;
     for (int i = 0; i < cap && indices[i] >= 0; i++) {
-        vals[i] = expf((vals[i] - max_val) / temperature);
+        vals[i] = expf((vals[i] - max_val) / sp.temperature);
         sum += vals[i];
         count++;
     }
     for (int i = 0; i < count; i++) vals[i] /= sum;
 
-    /* Truncate at cumulative probability = top_p */
-    float cum = 0.0f;
-    int n_keep = 0;
-    for (int i = 0; i < count; i++) {
-        cum += vals[i];
-        n_keep++;
-        if (cum >= top_p) break;
+    /* Step 3: min-p filter — remove tokens with prob < min_p * max_prob */
+    int n_keep = count;
+    if (sp.min_p > 0.0f) {
+        float threshold = sp.min_p * vals[0];  /* vals[0] is max after softmax */
+        n_keep = 0;
+        for (int i = 0; i < count; i++) {
+            if (vals[i] >= threshold) n_keep++;
+            else break;  /* sorted descending, so rest are also below */
+        }
+        if (n_keep == 0) n_keep = 1;  /* always keep at least the best */
     }
 
-    /* Re-normalize the kept candidates */
+    /* Step 4: top-p (nucleus) filter */
+    if (sp.top_p > 0.0f && sp.top_p < 1.0f) {
+        float cum = 0.0f;
+        int p_keep = 0;
+        for (int i = 0; i < n_keep; i++) {
+            cum += vals[i];
+            p_keep++;
+            if (cum >= sp.top_p) break;
+        }
+        n_keep = p_keep;
+    }
+
+    /* Step 5: re-normalize */
     float kept_sum = 0.0f;
     for (int i = 0; i < n_keep; i++) kept_sum += vals[i];
     for (int i = 0; i < n_keep; i++) vals[i] /= kept_sum;
 
-    /* Sample */
+    /* Step 6: sample */
     float r = (float)rand() / (float)RAND_MAX;
-    cum = 0.0f;
+    float cum = 0.0f;
     int result = indices[0];
     for (int i = 0; i < n_keep; i++) {
         cum += vals[i];
@@ -688,12 +714,16 @@ int main(int argc, char **argv) {
             int max_tokens = json_get_int(body, "max_tokens", 256);
             float temperature = json_get_float(body, "temperature", 0.7f);
             int top_k = json_get_int(body, "top_k", 40);
-            float top_p = json_get_float(body, "top_p", 0.0f);
+            float top_p = json_get_float(body, "top_p", 0.9f);
+            float min_p = json_get_float(body, "min_p", 0.05f);
+            int min_tokens = json_get_int(body, "min_tokens", 8);
             int stream = json_get_int(body, "stream", 0);
-            float rep_penalty = json_get_float(body, "repetition_penalty", 1.2f);
+            float rep_penalty = json_get_float(body, "repetition_penalty", 1.15f);
 
-            printf("Generate: \"%s\" (max=%d, temp=%.2f, topk=%d, topp=%.2f)\n",
-                   prompt, max_tokens, temperature, top_k, top_p);
+            sample_params_t sp = { top_k, top_p, min_p, temperature };
+
+            printf("Generate: (max=%d, temp=%.2f, topk=%d, topp=%.2f, minp=%.2f, rep=%.2f)\n",
+                   max_tokens, temperature, top_k, top_p, min_p, rep_penalty);
             fflush(stdout);
 
             /* Reset KV cache for new request */
@@ -753,13 +783,15 @@ int main(int argc, char **argv) {
                     int next;
                     if (temperature <= 0)
                         next = argmax_fn(logits, model->vocab_size);
-                    else if (top_p > 0.0f && top_p < 1.0f)
-                        next = sample_topp(logits, model->vocab_size, top_p, temperature);
                     else
-                        next = sample_topk(logits, model->vocab_size, top_k, temperature);
+                        next = sample_advanced(logits, model->vocab_size, sp);
 
-                    /* Stop on EOS or special control tokens */
-                    if (next == tk->eos_id || next == 3 || next == 6) break;
+                    /* Stop on EOS or special control tokens (but not before min_tokens) */
+                    if ((next == tk->eos_id || next == 3 || next == 6) && t >= min_tokens) break;
+                    if (next == tk->eos_id || next == 3 || next == 6) {
+                        logits[next] = -1e30f;  /* suppress EOS and resample */
+                        next = sample_advanced(logits, model->vocab_size, sp);
+                    }
                     gen_ids[gen_count++] = next;
 
                     /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
@@ -791,11 +823,18 @@ int main(int argc, char **argv) {
                         }
                     }
 
-                    int next = (temperature <= 0)
-                        ? argmax_fn(logits, model->vocab_size)
-                        : sample_topk(logits, model->vocab_size, top_k, temperature);
+                    int next;
+                    if (temperature <= 0)
+                        next = argmax_fn(logits, model->vocab_size);
+                    else
+                        next = sample_advanced(logits, model->vocab_size, sp);
 
-                    if (next == tk->eos_id || next == 3 || next == 6) break;
+                    /* Stop on EOS or special control tokens (but not before min_tokens) */
+                    if ((next == tk->eos_id || next == 3 || next == 6) && t >= min_tokens) break;
+                    if (next == tk->eos_id || next == 3 || next == 6) {
+                        logits[next] = -1e30f;
+                        next = sample_advanced(logits, model->vocab_size, sp);
+                    }
                     gen_ids[gen_count++] = next;
                     /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
                     const char *tok_text = tokenizer_decode(tk, next);
