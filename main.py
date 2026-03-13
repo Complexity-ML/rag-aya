@@ -200,6 +200,9 @@ def main():
     # GGUF options (uses aya-offline engine)
     parser.add_argument("--gguf", default="", help="Path to GGUF model file")
     parser.add_argument("--engine-port", type=int, default=8089, help="Aya engine server port")
+    # Generation options
+    parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens to generate (default: 512)")
+    parser.add_argument("--temperature", type=float, default=0.3, help="Sampling temperature (default: 0.3)")
     # WMT options
     parser.add_argument("--lang-pair", default="eng-ara", help="WMT lang pair (e.g. eng-ara, eng-bho)")
     parser.add_argument("--wmt-dataset", default=None, help="Small dataset: news_commentary, ted_talks, wikimatrix")
@@ -223,6 +226,8 @@ def main():
         gen_model=args.model,
         gguf_path=args.gguf,
         engine_port=args.engine_port,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
         wmt_max_lines=args.wmt_max_lines,
         local_embedder=args.local,
         local_embed_model=args.local_embed_model,

@@ -163,6 +163,7 @@ class AyaEngineGenerator:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_k": 40,
+            "top_p": 0.9,
             "repetition_penalty": 1.2,
         }, ensure_ascii=False).encode("utf-8")
 
@@ -208,6 +209,7 @@ class AyaEngineGenerator:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_k": 40,
+            "top_p": 0.9,
             "repetition_penalty": 1.2,
             "stream": 1,
         }, ensure_ascii=False).encode("utf-8")
