@@ -418,7 +418,7 @@ int main(int argc, char **argv) {
             int stream = json_get_int(body, "stream", 0);
             float rep_penalty = json_get_float(body, "repetition_penalty", 1.15f);
             float quality_alpha = json_get_float(body, "quality_alpha", 1.0f);
-            float entropy_threshold = json_get_float(body, "entropy_threshold", 4.5f);
+            float entropy_threshold = json_get_float(body, "entropy_threshold", 3.5f);
 
             sample_params_t sp = { top_k, top_p, min_p, temperature };
 
