@@ -237,6 +237,25 @@ int main(int argc, char **argv) {
     printf("Tokenizer: %d tokens, %d merges, BOS=%d, EOS=%d\n",
            tk->vocab_size, tk->n_merges, tk->bos_id, tk->eos_id);
     printf("Architecture: %s\n", model->architecture);
+    printf("Logit scale: %.6f\n", model->logit_scale);
+
+    /* Verify special token IDs — show what the hardcoded IDs actually decode to */
+    printf("Special token check:\n");
+    for (int id = 0; id <= 9; id++) {
+        const char *s = (id < tk->vocab_size && tk->tokens[id]) ? tk->tokens[id] : "(null)";
+        printf("  ID %d = '%s'\n", id, s);
+    }
+    /* Search for Cohere chat tokens in vocab */
+    {
+        const char *names[] = {"<|START_OF_TURN_TOKEN|>", "<|END_OF_TURN_TOKEN|>",
+                               "<|USER_TOKEN|>", "<|CHATBOT_TOKEN|>",
+                               "<|SYSTEM_TOKEN|>"};
+        for (int n = 0; n < 5; n++) {
+            int id = tok_lookup(tk, names[n]);
+            printf("  '%s' -> ID %d\n", names[n], id);
+        }
+    }
+    fflush(stdout);
 
     /* Build token quality vector */
     token_quality = build_token_quality(tk);
