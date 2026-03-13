@@ -85,9 +85,11 @@ def cmd_query(config: Config, query: str):
         logger.warning("No relevant documents found.")
         return
 
-    logger.info("Retrieved %d chunks:", config.top_k)
-    for chunk, score in retriever.search(query, k=config.top_k):
-        logger.info("  [%s] %.3f -- %s...", chunk.language, score, chunk.text[:80])
+    # Log the actual chunks that will be sent (parse from context)
+    context_parts = [p.strip() for p in context.split("\n\n") if p.strip()]
+    logger.info("Context: %d chunks (lang=%s):", len(context_parts), query_lang)
+    for part in context_parts:
+        logger.info("  %s...", part[:90])
 
     logger.info("Generating answer...")
     if hasattr(generator, 'generate_stream'):

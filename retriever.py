@@ -81,9 +81,11 @@ class Retriever:
             lang_map = {"en": "eng", "fr": "fra", "eng": "eng", "fra": "fra"}
             lang = lang_map.get(prefer_lang, prefer_lang)
             same_lang = [(c, s) for c, s in results if c.language == lang]
-            other = [(c, s) for c, s in results if c.language != lang]
-            # Take same-lang first, fill with other if needed
-            results = (same_lang + other)[:k]
+            # Only use same-language chunks to avoid confusing small models
+            if same_lang:
+                results = same_lang[:k]
+            else:
+                results = results[:k]  # fallback if no same-lang chunks
         else:
             results = results[:k]
         parts = []
