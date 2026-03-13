@@ -10,6 +10,16 @@ ifeq ($(OS),Windows_NT)
     TARGET  := aya-server.exe
 endif
 
+# macOS / Apple Silicon - use Accelerate framework + NEON
+UNAME_S := $(shell uname -s 2>/dev/null)
+ifeq ($(UNAME_S),Darwin)
+    LDFLAGS += -framework Accelerate
+    UNAME_M := $(shell uname -m)
+    ifeq ($(UNAME_M),arm64)
+        CFLAGS += -mcpu=apple-m1
+    endif
+endif
+
 all: $(TARGET)
 
 $(TARGET): $(SRC)
