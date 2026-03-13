@@ -97,6 +97,7 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
     int consecutive_newlines = 0;
     int high_entropy_count = 0;
     int got_first_word = 0;  /* leading garbage strip: skip until first alpha token */
+    char prev_decoded_end = 0;  /* last char of previous token for cross-token patterns */
 
     /* Response buffer (non-stream) */
     char *response = NULL;
@@ -162,6 +163,7 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
 
         /* Degeneration pattern stop — signals the useful response ended */
         if (t >= min_tokens) {
+            int dlen = (int)strlen(decoded);
             if ((decoded[0] == '[' && decoded[1] == '[') ||
                 (decoded[0] == '-' && decoded[1] == '-' && decoded[2] == '-') ||
                 (decoded[0] == '#' && decoded[1] == '#') ||
@@ -170,10 +172,13 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
                 (decoded[0] == '>' && decoded[1] == '>' && decoded[2] == '>') ||
                 (strstr(decoded, "**Note") != NULL) ||
                 (strstr(decoded, "Note:") != NULL && decoded[0] == 'N') ||
-                (strstr(decoded, "\"*") != NULL)) {
+                (strstr(decoded, "\"*") != NULL) ||
+                /* Cross-token: prev ended with " and current starts with * or \n */
+                (prev_decoded_end == '"' && (decoded[0] == '*' || decoded[0] == '\n'))) {
                 printf("  Pattern stop: '%s' at token %d\n", decoded, t);
                 break;
             }
+            prev_decoded_end = dlen > 0 ? decoded[dlen - 1] : 0;
         }
 
         /* Leading garbage strip — skip tokens before first alphabetic content */
