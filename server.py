@@ -264,6 +264,15 @@ def main():
     parser.add_argument("--engine-port", type=int, default=8089)
     args = parser.parse_args()
 
+    # Auto-detect GGUF: if not specified, look for one in current directory
+    if not args.gguf:
+        import glob as _glob
+        gguf_files = _glob.glob("*.gguf")
+        if gguf_files:
+            args.gguf = gguf_files[0]
+            args.local = True
+            logger.info("Auto-detected GGUF: %s (local mode)", args.gguf)
+
     config = Config(
         index_path=args.index_path,
         gen_model=args.model,

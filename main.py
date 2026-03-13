@@ -206,6 +206,15 @@ def main():
     parser.add_argument("--wmt-max-lines", type=int, default=500)
     args = parser.parse_args()
 
+    # Auto-detect GGUF: if not specified, look for one in current directory
+    if not args.gguf:
+        import glob as _glob
+        gguf_files = _glob.glob("*.gguf")
+        if gguf_files:
+            args.gguf = gguf_files[0]
+            args.local = True
+            logger.info("Auto-detected GGUF: %s (local mode)", args.gguf)
+
     config = Config(
         top_k=args.top_k,
         max_documents=args.max_docs,
