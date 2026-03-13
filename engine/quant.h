@@ -88,7 +88,42 @@ static inline float dot_q4k_f32(const uint8_t *qdata, const float *x, int n) {
             const uint8_t *qj = quants + j * 32;
             const float *xj = xb + j * 64;
 
-#if HAS_NEON
+#if HAS_AVX2
+            /* AVX2: process 32 quant bytes → 32 low nibbles + 32 high nibbles */
+            __m256 vqsum0 = _mm256_setzero_ps();
+            __m256 vqsum1 = _mm256_setzero_ps();
+            __m256 vxsum0 = _mm256_setzero_ps();
+            __m256 vxsum1 = _mm256_setzero_ps();
+            for (int l = 0; l < 32; l += 8) {
+                /* Load 8 quant bytes, extract low/high nibbles */
+                __m128i qraw = _mm_loadl_epi64((const __m128i *)(qj + l));
+                __m256i q32 = _mm256_cvtepu8_epi32(qraw);
+                __m256i q_lo_i = _mm256_and_si256(q32, _mm256_set1_epi32(0xF));
+                __m256i q_hi_i = _mm256_srli_epi32(q32, 4);
+                __m256 q_lo = _mm256_cvtepi32_ps(q_lo_i);
+                __m256 q_hi = _mm256_cvtepi32_ps(q_hi_i);
+                /* Load 8 x values for low nibbles and high nibbles */
+                __m256 vx0 = _mm256_loadu_ps(xj + l);
+                __m256 vx1 = _mm256_loadu_ps(xj + l + 32);
+                vqsum0 = _mm256_fmadd_ps(q_lo, vx0, vqsum0);
+                vqsum1 = _mm256_fmadd_ps(q_hi, vx1, vqsum1);
+                vxsum0 = _mm256_add_ps(vxsum0, vx0);
+                vxsum1 = _mm256_add_ps(vxsum1, vx1);
+            }
+            /* Horizontal sum */
+            __m128 lo0 = _mm_add_ps(_mm256_castps256_ps128(vqsum0), _mm256_extractf128_ps(vqsum0, 1));
+            lo0 = _mm_hadd_ps(lo0, lo0); lo0 = _mm_hadd_ps(lo0, lo0);
+            float qsum0 = _mm_cvtss_f32(lo0);
+            __m128 lo1 = _mm_add_ps(_mm256_castps256_ps128(vqsum1), _mm256_extractf128_ps(vqsum1, 1));
+            lo1 = _mm_hadd_ps(lo1, lo1); lo1 = _mm_hadd_ps(lo1, lo1);
+            float qsum1 = _mm_cvtss_f32(lo1);
+            __m128 sx0 = _mm_add_ps(_mm256_castps256_ps128(vxsum0), _mm256_extractf128_ps(vxsum0, 1));
+            sx0 = _mm_hadd_ps(sx0, sx0); sx0 = _mm_hadd_ps(sx0, sx0);
+            float xsum0 = _mm_cvtss_f32(sx0);
+            __m128 sx1 = _mm_add_ps(_mm256_castps256_ps128(vxsum1), _mm256_extractf128_ps(vxsum1, 1));
+            sx1 = _mm_hadd_ps(sx1, sx1); sx1 = _mm_hadd_ps(sx1, sx1);
+            float xsum1 = _mm_cvtss_f32(sx1);
+#elif HAS_NEON
             float32x4_t vqsum0 = vdupq_n_f32(0.0f);
             float32x4_t vqsum1 = vdupq_n_f32(0.0f);
             float32x4_t vxsum0 = vdupq_n_f32(0.0f);
@@ -204,7 +239,79 @@ static inline float dot_q6k_f32(const uint8_t *qdata, const float *x, int n) {
         const float *yb = x + b * 256;
 
         for (int half = 0; half < 2; half++) {
-#if HAS_NEON
+#if HAS_AVX2
+            /* AVX2: process 2 sub-groups of 16 elements each */
+            for (int ig = 0; ig < 2; ig++) {
+                float dsc0 = d * sc[ig + 0];
+                float dsc2 = d * sc[ig + 2];
+                float dsc4 = d * sc[ig + 4];
+                float dsc6 = d * sc[ig + 6];
+                __m256 acc0 = _mm256_setzero_ps();
+                __m256 acc1 = _mm256_setzero_ps();
+                __m256 acc2 = _mm256_setzero_ps();
+                __m256 acc3 = _mm256_setzero_ps();
+                int base = ig * 16;
+                for (int l = base; l < base + 16; l += 8) {
+                    /* Load 8 ql bytes from each position */
+                    __m128i ql_lo_raw = _mm_loadl_epi64((const __m128i *)(ql + l));
+                    __m128i ql_hi_raw = _mm_loadl_epi64((const __m128i *)(ql + l + 32));
+                    __m128i qh_raw    = _mm_loadl_epi64((const __m128i *)(qh + l));
+                    /* Widen to 32-bit for manipulation */
+                    __m256i ql_lo_32 = _mm256_cvtepu8_epi32(ql_lo_raw);
+                    __m256i ql_hi_32 = _mm256_cvtepu8_epi32(ql_hi_raw);
+                    __m256i qh_32    = _mm256_cvtepu8_epi32(qh_raw);
+                    __m256i mask_0xF = _mm256_set1_epi32(0xF);
+                    __m256i mask_3   = _mm256_set1_epi32(3);
+                    __m256i v32      = _mm256_set1_epi32(32);
+                    /* q1 = (ql[l] & 0xF) | ((qh[l]>>0 & 3) << 4) - 32 */
+                    __m256i q1_i = _mm256_or_si256(
+                        _mm256_and_si256(ql_lo_32, mask_0xF),
+                        _mm256_slli_epi32(_mm256_and_si256(qh_32, mask_3), 4));
+                    q1_i = _mm256_sub_epi32(q1_i, v32);
+                    __m256 fq1 = _mm256_cvtepi32_ps(q1_i);
+                    /* q2 = (ql[l+32] & 0xF) | ((qh[l]>>2 & 3) << 4) - 32 */
+                    __m256i q2_i = _mm256_or_si256(
+                        _mm256_and_si256(ql_hi_32, mask_0xF),
+                        _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(qh_32, 2), mask_3), 4));
+                    q2_i = _mm256_sub_epi32(q2_i, v32);
+                    __m256 fq2 = _mm256_cvtepi32_ps(q2_i);
+                    /* q3 = (ql[l] >> 4) | ((qh[l]>>4 & 3) << 4) - 32 */
+                    __m256i q3_i = _mm256_or_si256(
+                        _mm256_srli_epi32(ql_lo_32, 4),
+                        _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(qh_32, 4), mask_3), 4));
+                    q3_i = _mm256_sub_epi32(q3_i, v32);
+                    __m256 fq3 = _mm256_cvtepi32_ps(q3_i);
+                    /* q4 = (ql[l+32] >> 4) | ((qh[l]>>6 & 3) << 4) - 32 */
+                    __m256i q4_i = _mm256_or_si256(
+                        _mm256_srli_epi32(ql_hi_32, 4),
+                        _mm256_slli_epi32(_mm256_srli_epi32(qh_32, 6), 4));
+                    q4_i = _mm256_sub_epi32(q4_i, v32);
+                    __m256 fq4 = _mm256_cvtepi32_ps(q4_i);
+                    /* Load x vectors */
+                    __m256 vx0 = _mm256_loadu_ps(yb + l);
+                    __m256 vx1 = _mm256_loadu_ps(yb + l + 32);
+                    __m256 vx2 = _mm256_loadu_ps(yb + l + 64);
+                    __m256 vx3 = _mm256_loadu_ps(yb + l + 96);
+                    acc0 = _mm256_fmadd_ps(fq1, vx0, acc0);
+                    acc1 = _mm256_fmadd_ps(fq2, vx1, acc1);
+                    acc2 = _mm256_fmadd_ps(fq3, vx2, acc2);
+                    acc3 = _mm256_fmadd_ps(fq4, vx3, acc3);
+                }
+                /* Horizontal sums */
+                __m128 h0 = _mm_add_ps(_mm256_castps256_ps128(acc0), _mm256_extractf128_ps(acc0, 1));
+                h0 = _mm_hadd_ps(h0, h0); h0 = _mm_hadd_ps(h0, h0);
+                total += dsc0 * _mm_cvtss_f32(h0);
+                __m128 h1 = _mm_add_ps(_mm256_castps256_ps128(acc1), _mm256_extractf128_ps(acc1, 1));
+                h1 = _mm_hadd_ps(h1, h1); h1 = _mm_hadd_ps(h1, h1);
+                total += dsc2 * _mm_cvtss_f32(h1);
+                __m128 h2 = _mm_add_ps(_mm256_castps256_ps128(acc2), _mm256_extractf128_ps(acc2, 1));
+                h2 = _mm_hadd_ps(h2, h2); h2 = _mm_hadd_ps(h2, h2);
+                total += dsc4 * _mm_cvtss_f32(h2);
+                __m128 h3 = _mm_add_ps(_mm256_castps256_ps128(acc3), _mm256_extractf128_ps(acc3, 1));
+                h3 = _mm_hadd_ps(h3, h3); h3 = _mm_hadd_ps(h3, h3);
+                total += dsc6 * _mm_cvtss_f32(h3);
+            }
+#elif HAS_NEON
             /* Process 2 sub-groups of 16 elements each */
             for (int ig = 0; ig < 2; ig++) {
                 float dsc0 = d * sc[ig + 0];
