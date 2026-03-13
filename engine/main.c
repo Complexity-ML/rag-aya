@@ -767,6 +767,7 @@ int main(int argc, char **argv) {
             /* Repetition penalty: track generated token IDs */
             int *gen_ids = malloc(max_tokens * sizeof(int));
             int gen_count = 0;
+            int consecutive_newlines = 0;  /* stop on double newline (model done) */
 
             if (stream) {
                 send_sse_start(client);
@@ -801,7 +802,20 @@ int main(int argc, char **argv) {
                     }
 
                     char decoded[256];
-                    decode_token_str(tokenizer_decode(tk, next), decoded, sizeof(decoded));
+                    decode_token_str(tok_text, decoded, sizeof(decoded));
+
+                    /* Filter bracket artifacts like [[ ]] */
+                    if (decoded[0] == '[' && decoded[1] == '[') {
+                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
+                    }
+
+                    /* Track consecutive newlines — stop if model outputs 2+ blank lines */
+                    if (strcmp(decoded, "\n") == 0 || strcmp(decoded, "\n\n") == 0)
+                        consecutive_newlines++;
+                    else
+                        consecutive_newlines = 0;
+                    if (consecutive_newlines >= 3 && t >= min_tokens) break;
+
                     send_sse_token(client, decoded);
 
                     free(logits);
@@ -843,7 +857,20 @@ int main(int argc, char **argv) {
                     }
 
                     char decoded[256];
-                    decode_token_str(tokenizer_decode(tk, next), decoded, sizeof(decoded));
+                    decode_token_str(tok_text, decoded, sizeof(decoded));
+
+                    /* Filter bracket artifacts like [[ ]] */
+                    if (decoded[0] == '[' && decoded[1] == '[') {
+                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
+                    }
+
+                    /* Track consecutive newlines — stop if model outputs 2+ blank lines */
+                    if (strcmp(decoded, "\n") == 0 || strcmp(decoded, "\n\n") == 0)
+                        consecutive_newlines++;
+                    else
+                        consecutive_newlines = 0;
+                    if (consecutive_newlines >= 3 && t >= min_tokens) break;
+
                     int dlen = (int)strlen(decoded);
                     memcpy(response + resp_len, decoded, dlen);
                     resp_len += dlen;
