@@ -731,7 +731,11 @@ int main(int argc, char **argv) {
 
                     if (next == tk->eos_id || next == 3 || next == 6) break;
                     gen_ids[gen_count++] = next;
-                    if (next <= 9) { free(logits); logits = model_forward(model, cache, next, pos); pos++; continue; }
+                    /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
+                    const char *tok_text = tokenizer_decode(tk, next);
+                    if (next <= 9 || (tok_text[0] == '<' && tok_text[1] == '|')) {
+                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
+                    }
 
                     char decoded[256];
                     decode_token_str(tokenizer_decode(tk, next), decoded, sizeof(decoded));
