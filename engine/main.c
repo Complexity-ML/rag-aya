@@ -97,7 +97,6 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
     int consecutive_newlines = 0;
     int high_entropy_count = 0;
     int got_first_word = 0;  /* leading garbage strip: skip until first alpha token */
-    int quote_close_count = 0;  /* track closing quote patterns */
 
     /* Response buffer (non-stream) */
     char *response = NULL;
@@ -161,31 +160,19 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
         char decoded[256];
         decode_token_str(tok_text, decoded, sizeof(decoded));
 
-        /* Filter [[ artifacts */
-        if (decoded[0] == '[' && decoded[1] == '[') {
-            free(logits); logits = model_forward(model, cache, next, pos); pos++;
-            continue;
-        }
-
         /* Degeneration pattern stop — signals the useful response ended */
         if (t >= min_tokens) {
-            if ((decoded[0] == '-' && decoded[1] == '-' && decoded[2] == '-') ||
+            if ((decoded[0] == '[' && decoded[1] == '[') ||
+                (decoded[0] == '-' && decoded[1] == '-' && decoded[2] == '-') ||
                 (decoded[0] == '#' && decoded[1] == '#') ||
-                (decoded[0] == '*' && decoded[1] == '*' && decoded[2] == '*') ||
+                (decoded[0] == '*' && decoded[1] == '*' && (decoded[2] == '*' || decoded[2] == '[')) ||
                 (decoded[0] == '<' && decoded[1] == '<' && decoded[2] == '<') ||
                 (decoded[0] == '>' && decoded[1] == '>' && decoded[2] == '>') ||
                 (strstr(decoded, "**Note") != NULL) ||
-                (strstr(decoded, "Note:") != NULL && decoded[0] == 'N')) {
+                (strstr(decoded, "Note:") != NULL && decoded[0] == 'N') ||
+                (strstr(decoded, "\"*") != NULL)) {
                 printf("  Pattern stop: '%s' at token %d\n", decoded, t);
                 break;
-            }
-            /* Track "* closing pattern — Aya wraps response in quotes */
-            if (strstr(decoded, "\"*") != NULL) {
-                quote_close_count++;
-                if (quote_close_count >= 2) {
-                    printf("  Quote close stop at token %d\n", t);
-                    break;
-                }
             }
         }
 
