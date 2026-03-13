@@ -173,8 +173,10 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
                 (strstr(decoded, "**Note") != NULL) ||
                 (strstr(decoded, "Note:") != NULL && decoded[0] == 'N') ||
                 (strstr(decoded, "\"*") != NULL) ||
-                /* Cross-token: prev ended with " and current starts with * or \n */
-                (prev_decoded_end == '"' && (decoded[0] == '*' || decoded[0] == '\n'))) {
+                (strstr(decoded, "\"\"") != NULL) ||
+                (decoded[0] == '"' && decoded[1] == '"') ||
+                /* Cross-token: prev ended with " and current starts with " * \n */
+                (prev_decoded_end == '"' && (decoded[0] == '*' || decoded[0] == '\n' || decoded[0] == '"'))) {
                 printf("  Pattern stop: '%s' at token %d\n", decoded, t);
                 break;
             }
