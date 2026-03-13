@@ -164,7 +164,7 @@ class AyaEngineGenerator:
             "temperature": temperature,
             "top_k": 40,
             "repetition_penalty": 1.2,
-        }).encode()
+        }, ensure_ascii=False).encode("utf-8")
 
         req = urllib.request.Request(
             f"{self.url}/generate",
@@ -210,7 +210,7 @@ class AyaEngineGenerator:
             "top_k": 40,
             "repetition_penalty": 1.2,
             "stream": 1,
-        }).encode()
+        }, ensure_ascii=False).encode("utf-8")
 
         req = urllib.request.Request(
             f"{self.url}/generate",
