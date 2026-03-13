@@ -167,7 +167,8 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
         /* Degeneration pattern stop — signals the useful response ended */
         if (t >= min_tokens) {
             int dlen = (int)strlen(decoded);
-            if ((decoded[0] == '[' && decoded[1] == '[') ||
+            if ((decoded[0] == '[' && decoded[1] >= 'A' && decoded[1] <= 'Z') ||
+                (decoded[0] == '[' && decoded[1] == '[') ||
                 (decoded[0] == '-' && decoded[1] == '-' && decoded[2] == '-') ||
                 (decoded[0] == '#' && decoded[1] == '#') ||
                 (decoded[0] == '*' && decoded[1] == '*' && (decoded[2] == '*' || decoded[2] == '[')) ||
