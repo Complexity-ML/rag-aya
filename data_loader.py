@@ -127,7 +127,8 @@ def load_wmt_dataset(
     try:
         result = subprocess.run(
             _mtdata_cmd() + ["echo", dataset_id],
-            capture_output=True, timeout=300, encoding="cp1252",
+            capture_output=True, timeout=300,
+            encoding="cp1252" if sys.platform == "win32" else "utf-8",
         )
         if not result.stdout.strip():
             logger.error("mtdata echo returned no data: %s", result.stderr[:200])
