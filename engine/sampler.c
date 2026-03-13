@@ -192,6 +192,21 @@ float *build_token_quality(tokenizer_t *tk) {
             if (all_same) { score = -3.0f; goto done; }
         }
 
+        /* Long ALL-CAPS tokens (likely hashtags/noise like GOLDWORLDWIDE) */
+        if (len >= 6) {
+            int all_upper = 1;
+            for (int j = 0; j < len; j++) {
+                if (!(tok[j] >= 'A' && tok[j] <= 'Z')) { all_upper = 0; break; }
+            }
+            if (all_upper) { score = -2.0f; goto done; }
+        }
+
+        /* Hashtag-style tokens (#SOMETHING) */
+        if (tok[0] == '#' && len >= 4) {
+            score = -1.5f;
+            goto done;
+        }
+
         /* Non-printable content */
         if (!is_printable(tok)) {
             score = -1.0f;

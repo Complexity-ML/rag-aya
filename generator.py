@@ -232,7 +232,7 @@ class AyaEngineGenerator:
                     break
                 if not raw:
                     break
-                line = raw.decode("utf-8").strip()
+                line = raw.decode("utf-8", errors="replace").strip()
                 if line == "data: [DONE]":
                     break
                 if line.startswith("data: "):
