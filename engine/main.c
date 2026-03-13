@@ -96,6 +96,7 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
     int gen_count = 0;
     int consecutive_newlines = 0;
     int high_entropy_count = 0;
+    int got_first_word = 0;  /* leading garbage strip: skip until first alpha token */
 
     /* Response buffer (non-stream) */
     char *response = NULL;
@@ -163,6 +164,34 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
         if (decoded[0] == '[' && decoded[1] == '[') {
             free(logits); logits = model_forward(model, cache, next, pos); pos++;
             continue;
+        }
+
+        /* Degeneration pattern stop — signals the useful response ended */
+        if (t >= min_tokens) {
+            if ((decoded[0] == '-' && decoded[1] == '-' && decoded[2] == '-') ||
+                (decoded[0] == '#' && decoded[1] == '#') ||
+                (decoded[0] == '*' && decoded[1] == '*' && decoded[2] == '*') ||
+                (decoded[0] == '<' && decoded[1] == '<' && decoded[2] == '<') ||
+                (decoded[0] == '>' && decoded[1] == '>' && decoded[2] == '>')) {
+                printf("  Pattern stop: '%s' at token %d\n", decoded, t);
+                break;
+            }
+        }
+
+        /* Leading garbage strip — skip tokens before first alphabetic content */
+        if (!got_first_word) {
+            int has_alpha = 0;
+            for (int ci = 0; decoded[ci]; ci++) {
+                unsigned char ch = (unsigned char)decoded[ci];
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+                    has_alpha = 1; break;
+                }
+            }
+            if (!has_alpha) {
+                free(logits); logits = model_forward(model, cache, next, pos); pos++;
+                continue;
+            }
+            got_first_word = 1;
         }
 
         /* Consecutive newline stop */
@@ -391,7 +420,7 @@ int main(int argc, char **argv) {
             int stream = json_get_int(body, "stream", 0);
             float rep_penalty = json_get_float(body, "repetition_penalty", 1.15f);
             float quality_alpha = json_get_float(body, "quality_alpha", 1.0f);
-            float entropy_threshold = json_get_float(body, "entropy_threshold", 6.0f);
+            float entropy_threshold = json_get_float(body, "entropy_threshold", 4.5f);
 
             sample_params_t sp = { top_k, top_p, min_p, temperature };
 
