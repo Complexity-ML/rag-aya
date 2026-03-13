@@ -1,5 +1,5 @@
 /**
- * Transformer forward pass — integer-first inference.
+ * Transformer forward pass — supports Cohere2, LLaMA, and GPT-2 architectures.
  * INL 2025
  */
 #include "model.h"
@@ -9,10 +9,13 @@
 #include <string.h>
 #include <math.h>
 
-/* Dequantize a small tensor (norms) to f32 */
+/* ---- Helpers ---- */
+
+/* Dequantize a small tensor (norms, biases) to f32.
+ * Returns NULL silently if tensor is absent (optional). */
 static float *dequant_tensor(gguf_file *gguf, const char *name) {
     gguf_tensor_info *t = gguf_find_tensor(gguf, name);
-    if (!t) { fprintf(stderr, "Missing tensor: %s\n", name); return NULL; }
+    if (!t) return NULL;
 
     uint8_t *data = gguf_tensor_data(gguf, t);
     int n = (int)t->n_elements;
@@ -27,6 +30,13 @@ static float *dequant_tensor(gguf_file *gguf, const char *name) {
         fprintf(stderr, "TODO: dequant type %d for %s\n", t->type, name);
         memset(out, 0, n * sizeof(float));
     }
+    return out;
+}
+
+/* Like dequant_tensor but prints a warning if missing (required tensor) */
+static float *dequant_tensor_required(gguf_file *gguf, const char *name) {
+    float *out = dequant_tensor(gguf, name);
+    if (!out) fprintf(stderr, "Missing tensor: %s\n", name);
     return out;
 }
 
@@ -67,7 +77,6 @@ static void embed_lookup(uint8_t *data, int type, int row, int cols, float *out)
             }
             const uint8_t *quants = block + 16;
             float *ob = out + b * 256;
-            /* 4 groups of 64: low nibble = first 32, high nibble = next 32 */
             for (int j = 0; j < 4; j++) {
                 float sc0 = d * scales[j*2];
                 float m0  = dmin * mins[j*2];
@@ -87,6 +96,8 @@ static void embed_lookup(uint8_t *data, int type, int row, int cols, float *out)
     }
 }
 
+/* ---- Model loading ---- */
+
 model_t *model_load(gguf_file *gguf) {
     model_t *m = calloc(1, sizeof(model_t));
 
@@ -101,14 +112,18 @@ model_t *model_load(gguf_file *gguf) {
     m->rope_theta       = gguf->rope_theta;
     m->logit_scale      = gguf->logit_scale;
 
+    strncpy(m->architecture, gguf->architecture, sizeof(m->architecture) - 1);
     m->file_data = gguf->data;
     m->file_size = gguf->file_size;
 
-    printf("  Config: H=%d, L=%d, NH=%d, NKV=%d, INTER=%d, V=%d, HD=%d\n",
-           m->hidden_size, m->num_layers, m->num_heads, m->num_kv_heads,
-           m->intermediate_size, m->vocab_size, m->head_dim);
+    int is_gpt2 = (strcmp(m->architecture, "gpt2") == 0 ||
+                   strcmp(m->architecture, "gptneox") == 0);
 
-    /* Embeddings — keep quantized */
+    printf("  Config: arch=%s H=%d, L=%d, NH=%d, NKV=%d, INTER=%d, V=%d, HD=%d\n",
+           m->architecture, m->hidden_size, m->num_layers, m->num_heads,
+           m->num_kv_heads, m->intermediate_size, m->vocab_size, m->head_dim);
+
+    /* Token embeddings — keep quantized */
     gguf_tensor_info *emb_t = gguf_find_tensor(gguf, "token_embd.weight");
     if (emb_t) {
         m->embed_data = gguf_tensor_data(gguf, emb_t);
@@ -117,8 +132,18 @@ model_t *model_load(gguf_file *gguf) {
         printf("  Embed: type=%d, row_bytes=%zu\n", m->embed_type, m->embed_row_bytes);
     }
 
-    /* Output norm (small, dequant to f32) */
-    m->output_norm = dequant_tensor(gguf, "output_norm.weight");
+    /* Position embeddings (GPT-2) */
+    gguf_tensor_info *pos_t = gguf_find_tensor(gguf, "position_embd.weight");
+    if (pos_t) {
+        m->pos_embed_data = gguf_tensor_data(gguf, pos_t);
+        m->pos_embed_type = pos_t->type;
+        m->pos_embed_row_bytes = bytes_per_row(pos_t->type, m->hidden_size);
+        printf("  Position embed: type=%d\n", m->pos_embed_type);
+    }
+
+    /* Output norm */
+    m->output_norm = dequant_tensor_required(gguf, "output_norm.weight");
+    m->output_norm_bias = dequant_tensor(gguf, "output_norm.bias");
 
     /* Output weight — keep quantized or use tied embedding */
     gguf_tensor_info *out_t = gguf_find_tensor(gguf, "output.weight");
@@ -142,59 +167,102 @@ model_t *model_load(gguf_file *gguf) {
         char name[128];
         layer_weights *lw = &m->layers[l];
 
+        /* Macro to find a tensor (optional — no warning if missing) */
         #define FIND_T(field, type_field, suffix) do { \
             snprintf(name, sizeof(name), "blk.%d." suffix, l); \
             gguf_tensor_info *ti = gguf_find_tensor(gguf, name); \
             if (ti) { lw->field = gguf_tensor_data(gguf, ti); \
                        lw->type_field = ti->type; } \
-            else fprintf(stderr, "WARN: missing %s\n", name); \
         } while(0)
 
-        FIND_T(q_proj, q_type, "attn_q.weight");
-        FIND_T(k_proj, k_type, "attn_k.weight");
-        FIND_T(v_proj, v_type, "attn_v.weight");
+        /* Combined QKV (GPT-2 style) */
+        FIND_T(qkv_proj, qkv_type, "attn_qkv.weight");
+
+        if (!lw->qkv_proj) {
+            /* Separate Q/K/V (Cohere2, LLaMA) */
+            FIND_T(q_proj, q_type, "attn_q.weight");
+            FIND_T(k_proj, k_type, "attn_k.weight");
+            FIND_T(v_proj, v_type, "attn_v.weight");
+            if (!lw->q_proj && l == 0)
+                fprintf(stderr, "WARN: no attn_q or attn_qkv at layer 0\n");
+        }
+
         FIND_T(o_proj, o_type, "attn_output.weight");
         FIND_T(gate_proj, gate_type, "ffn_gate.weight");
         FIND_T(up_proj,   up_type,   "ffn_up.weight");
         FIND_T(down_proj, down_type, "ffn_down.weight");
 
-        if (l == 0 || l == m->num_layers - 1) {
-            printf("  L%d types: q=%d k=%d v=%d o=%d gate=%d up=%d down=%d\n",
-                   l, lw->q_type, lw->k_type, lw->v_type, lw->o_type,
-                   lw->gate_type, lw->up_type, lw->down_type);
-            fflush(stdout);
-        }
+        /* Bias terms (optional) */
+        snprintf(name, sizeof(name), "blk.%d.attn_qkv.bias", l);
+        lw->qkv_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.attn_q.bias", l);
+        lw->q_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.attn_k.bias", l);
+        lw->k_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.attn_v.bias", l);
+        lw->v_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.attn_output.bias", l);
+        lw->o_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.ffn_up.bias", l);
+        lw->up_bias = dequant_tensor(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.ffn_down.bias", l);
+        lw->down_bias = dequant_tensor(gguf, name);
 
-        /* Norms (always dequant to f32 — tiny) */
+        #undef FIND_T
+
+        /* Norms */
         snprintf(name, sizeof(name), "blk.%d.attn_norm.weight", l);
-        lw->attn_norm = dequant_tensor(gguf, name);
+        lw->attn_norm = dequant_tensor_required(gguf, name);
+        snprintf(name, sizeof(name), "blk.%d.attn_norm.bias", l);
+        lw->attn_norm_bias = dequant_tensor(gguf, name);
+
         snprintf(name, sizeof(name), "blk.%d.ffn_norm.weight", l);
         gguf_tensor_info *ffn_norm_t = gguf_find_tensor(gguf, name);
         if (ffn_norm_t) {
             lw->ffn_norm = dequant_tensor(gguf, name);
+            snprintf(name, sizeof(name), "blk.%d.ffn_norm.bias", l);
+            lw->ffn_norm_bias = dequant_tensor(gguf, name);
         } else {
             /* Cohere2: parallel attn+FFN, shared norm */
             lw->ffn_norm = lw->attn_norm;
+            lw->ffn_norm_bias = lw->attn_norm_bias;
+        }
+
+        if (l == 0 || l == m->num_layers - 1) {
+            if (lw->qkv_proj)
+                printf("  L%d types: qkv=%d o=%d up=%d down=%d%s\n",
+                       l, lw->qkv_type, lw->o_type, lw->up_type, lw->down_type,
+                       lw->attn_norm_bias ? " [LayerNorm]" : " [RMSNorm]");
+            else
+                printf("  L%d types: q=%d k=%d v=%d o=%d gate=%d up=%d down=%d\n",
+                       l, lw->q_type, lw->k_type, lw->v_type, lw->o_type,
+                       lw->gate_type, lw->up_type, lw->down_type);
+            fflush(stdout);
         }
 
         if (l % 4 == 0) {
-            printf("  Layer %d/%d (q=%d gate=%d up=%d down=%d)\n",
-                   l, m->num_layers, lw->q_type, lw->gate_type,
-                   lw->up_type, lw->down_type);
+            printf("  Layer %d/%d loaded\n", l, m->num_layers);
         }
     }
 
-    printf("Model loaded.\n");
+    printf("Model loaded (%s).\n", is_gpt2 ? "GPT-2/dense" : "Cohere2/quantized");
     return m;
 }
 
 void model_free(model_t *m) {
     if (!m) return;
     free(m->output_norm);
+    free(m->output_norm_bias);
     for (int l = 0; l < m->num_layers; l++) {
-        free(m->layers[l].attn_norm);
-        if (m->layers[l].ffn_norm != m->layers[l].attn_norm)
-            free(m->layers[l].ffn_norm);
+        layer_weights *lw = &m->layers[l];
+        free(lw->attn_norm);
+        if (lw->ffn_norm != lw->attn_norm) free(lw->ffn_norm);
+        if (lw->attn_norm_bias) free(lw->attn_norm_bias);
+        if (lw->ffn_norm_bias && lw->ffn_norm_bias != lw->attn_norm_bias)
+            free(lw->ffn_norm_bias);
+        free(lw->qkv_bias);
+        free(lw->q_bias); free(lw->k_bias); free(lw->v_bias); free(lw->o_bias);
+        free(lw->up_bias); free(lw->down_bias);
     }
     free(m->layers);
     free(m);
@@ -226,9 +294,31 @@ static void rms_norm(float *out, const float *x, const float *w, int n) {
     for (int i = 0; i < n; i++) out[i] = x[i] * ss * w[i];
 }
 
+/* LayerNorm: out = w * (x - mean) / sqrt(var + eps) + b */
+static void layer_norm(float *out, const float *x, const float *w,
+                       const float *b, int n) {
+    float mean = 0.0f;
+    for (int i = 0; i < n; i++) mean += x[i];
+    mean /= n;
+    float var = 0.0f;
+    for (int i = 0; i < n; i++) { float d = x[i] - mean; var += d * d; }
+    var /= n;
+    float inv = 1.0f / sqrtf(var + 1e-5f);
+    for (int i = 0; i < n; i++)
+        out[i] = w[i] * (x[i] - mean) * inv + (b ? b[i] : 0.0f);
+}
+
 static void silu_inplace(float *x, int n) {
     for (int i = 0; i < n; i++) {
         x[i] = x[i] / (1.0f + expf(-x[i]));
+    }
+}
+
+/* GELU approximation (tanh version, same as GPT-2) */
+static void gelu_inplace(float *x, int n) {
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        x[i] = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
     }
 }
 
@@ -258,7 +348,13 @@ static void rope(float *q, float *k, int pos, int head_dim,
     }
 }
 
-/* Quantized matvec dispatch — bounds-safe */
+/* Add bias to vector (no-op if bias is NULL) */
+static void add_bias(float *x, const float *b, int n) {
+    if (!b) return;
+    for (int i = 0; i < n; i++) x[i] += b[i];
+}
+
+/* Quantized/dense matvec dispatch — bounds-safe */
 static void qmatvec_safe(model_t *m, const uint8_t *w, int type,
                           const float *x, float *out, int rows, int cols) {
     if (!w) {
@@ -281,7 +377,11 @@ static void qmatvec_safe(model_t *m, const uint8_t *w, int type,
         }
     }
 
-    if (type == GGML_TYPE_Q4_K) {
+    if (type == GGML_TYPE_F32) {
+        matvec_f32((const float *)w, x, out, safe_rows, cols);
+    } else if (type == GGML_TYPE_F16) {
+        matvec_f16((const uint16_t *)w, x, out, safe_rows, cols);
+    } else if (type == GGML_TYPE_Q4_K) {
         matvec_q4k(w, x, out, safe_rows, cols);
     } else if (type == GGML_TYPE_Q6_K) {
         matvec_q6k(w, x, out, safe_rows, cols);
@@ -295,6 +395,8 @@ static void qmatvec_safe(model_t *m, const uint8_t *w, int type,
     }
 }
 
+/* ---- Forward pass ---- */
+
 float *model_forward(model_t *m, kv_cache_t *cache, int token, int pos) {
     int H = m->hidden_size;
     int HD = m->head_dim;
@@ -302,10 +404,14 @@ float *model_forward(model_t *m, kv_cache_t *cache, int token, int pos) {
     int NKV = m->num_kv_heads;
     int KVD = m->kv_dim;
     int INTER = m->intermediate_size;
+    int use_layernorm = (m->pos_embed_data != NULL);  /* GPT-2 style */
+    int parallel_ffn = (!use_layernorm && m->layers[0].ffn_norm == m->layers[0].attn_norm);
 
-    /* Allocate scratch (one-shot) */
+    /* Allocate scratch */
     float *x      = malloc(H * sizeof(float));
     float *xnorm  = malloc(H * sizeof(float));
+    int qkv_size = (NH + 2 * NKV) * HD;
+    float *qkv_buf = malloc(qkv_size * sizeof(float));
     float *q      = malloc(NH * HD * sizeof(float));
     float *k      = malloc(KVD * sizeof(float));
     float *v      = malloc(KVD * sizeof(float));
@@ -314,35 +420,58 @@ float *model_forward(model_t *m, kv_cache_t *cache, int token, int pos) {
     float *gate   = malloc(INTER * sizeof(float));
     float *up     = malloc(INTER * sizeof(float));
     float *mlp_out = malloc(H * sizeof(float));
-    /* Pre-alloc scores for attention (max possible size) */
     float *scores = malloc((size_t)(pos + 1) * sizeof(float));
 
-    if (!x || !xnorm || !q || !k || !v || !attn_out || !proj ||
+    if (!x || !xnorm || !qkv_buf || !q || !k || !v || !attn_out || !proj ||
         !gate || !up || !mlp_out || !scores) {
         fprintf(stderr, "ERROR: malloc failed in forward pass\n");
-        fflush(stderr);
-        free(x); free(xnorm); free(q); free(k); free(v);
+        free(x); free(xnorm); free(qkv_buf); free(q); free(k); free(v);
         free(attn_out); free(proj); free(gate); free(up);
         free(mlp_out); free(scores);
         return NULL;
     }
 
-    /* Token embedding — dequant single row on demand */
+    /* Token embedding */
     embed_lookup(m->embed_data, m->embed_type, token, H, x);
+
+    /* Add position embedding (GPT-2) */
+    if (m->pos_embed_data) {
+        float pos_emb[4096];  /* stack buffer, enough for most models */
+        float *pe = (H <= 4096) ? pos_emb : malloc(H * sizeof(float));
+        embed_lookup(m->pos_embed_data, m->pos_embed_type, pos, H, pe);
+        for (int i = 0; i < H; i++) x[i] += pe[i];
+        if (pe != pos_emb) free(pe);
+    }
 
     for (int l = 0; l < m->num_layers; l++) {
         layer_weights *lw = &m->layers[l];
 
         /* Attention norm */
-        rms_norm(xnorm, x, lw->attn_norm, H);
+        if (use_layernorm)
+            layer_norm(xnorm, x, lw->attn_norm, lw->attn_norm_bias, H);
+        else
+            rms_norm(xnorm, x, lw->attn_norm, H);
 
         /* QKV projections */
-        qmatvec_safe(m, lw->q_proj, lw->q_type, xnorm, q, NH * HD, H);
-        qmatvec_safe(m, lw->k_proj, lw->k_type, xnorm, k, KVD, H);
-        qmatvec_safe(m, lw->v_proj, lw->v_type, xnorm, v, KVD, H);
+        if (lw->qkv_proj) {
+            /* Combined QKV — output is [Q, K, V] concatenated */
+            qmatvec_safe(m, lw->qkv_proj, lw->qkv_type, xnorm, qkv_buf, qkv_size, H);
+            add_bias(qkv_buf, lw->qkv_bias, qkv_size);
+            memcpy(q, qkv_buf, NH * HD * sizeof(float));
+            memcpy(k, qkv_buf + NH * HD, KVD * sizeof(float));
+            memcpy(v, qkv_buf + NH * HD + KVD, KVD * sizeof(float));
+        } else {
+            qmatvec_safe(m, lw->q_proj, lw->q_type, xnorm, q, NH * HD, H);
+            qmatvec_safe(m, lw->k_proj, lw->k_type, xnorm, k, KVD, H);
+            qmatvec_safe(m, lw->v_proj, lw->v_type, xnorm, v, KVD, H);
+            add_bias(q, lw->q_bias, NH * HD);
+            add_bias(k, lw->k_bias, KVD);
+            add_bias(v, lw->v_bias, KVD);
+        }
 
-        /* RoPE */
-        rope(q, k, pos, HD, NH, NKV, m->rope_theta);
+        /* RoPE (only for non-GPT-2 models) */
+        if (!use_layernorm)
+            rope(q, k, pos, HD, NH, NKV, m->rope_theta);
 
         /* Store KV in cache */
         size_t layer_base = (size_t)l * cache->max_seq * KVD;
@@ -389,31 +518,66 @@ float *model_forward(model_t *m, kv_cache_t *cache, int token, int pos) {
 
         /* Output projection */
         qmatvec_safe(m, lw->o_proj, lw->o_type, attn_out, proj, H, NH * HD);
+        add_bias(proj, lw->o_bias, H);
 
-        /* SwiGLU MLP (parallel: uses same xnorm as attention) */
-        qmatvec_safe(m, lw->gate_proj, lw->gate_type, xnorm, gate, INTER, H);
-        qmatvec_safe(m, lw->up_proj,   lw->up_type,   xnorm, up,   INTER, H);
-        silu_inplace(gate, INTER);
-        for (int i = 0; i < INTER; i++) gate[i] *= up[i];
-        qmatvec_safe(m, lw->down_proj, lw->down_type, gate, mlp_out, H, INTER);
+        if (parallel_ffn) {
+            /* Cohere2: parallel attn+FFN with SwiGLU, shared norm */
+            qmatvec_safe(m, lw->gate_proj, lw->gate_type, xnorm, gate, INTER, H);
+            qmatvec_safe(m, lw->up_proj,   lw->up_type,   xnorm, up,   INTER, H);
+            silu_inplace(gate, INTER);
+            for (int i = 0; i < INTER; i++) gate[i] *= up[i];
+            qmatvec_safe(m, lw->down_proj, lw->down_type, gate, mlp_out, H, INTER);
 
-        /* Residual: x += attn_proj + mlp_out (parallel add) */
-        for (int i = 0; i < H; i++) x[i] += proj[i] + mlp_out[i];
+            /* Residual: x += attn_proj + mlp_out (parallel) */
+            for (int i = 0; i < H; i++) x[i] += proj[i] + mlp_out[i];
+        } else {
+            /* Sequential: residual after attention, then FFN norm + MLP */
+            for (int i = 0; i < H; i++) x[i] += proj[i];
+
+            /* FFN norm */
+            if (use_layernorm)
+                layer_norm(xnorm, x, lw->ffn_norm, lw->ffn_norm_bias, H);
+            else
+                rms_norm(xnorm, x, lw->ffn_norm, H);
+
+            /* MLP */
+            if (lw->gate_proj) {
+                /* SwiGLU (LLaMA) */
+                qmatvec_safe(m, lw->gate_proj, lw->gate_type, xnorm, gate, INTER, H);
+                qmatvec_safe(m, lw->up_proj,   lw->up_type,   xnorm, up,   INTER, H);
+                silu_inplace(gate, INTER);
+                for (int i = 0; i < INTER; i++) gate[i] *= up[i];
+                qmatvec_safe(m, lw->down_proj, lw->down_type, gate, mlp_out, H, INTER);
+            } else {
+                /* GELU MLP (GPT-2): up -> gelu -> down */
+                qmatvec_safe(m, lw->up_proj, lw->up_type, xnorm, up, INTER, H);
+                add_bias(up, lw->up_bias, INTER);
+                gelu_inplace(up, INTER);
+                qmatvec_safe(m, lw->down_proj, lw->down_type, up, mlp_out, H, INTER);
+                add_bias(mlp_out, lw->down_bias, H);
+            }
+
+            /* Residual after MLP */
+            for (int i = 0; i < H; i++) x[i] += mlp_out[i];
+        }
     }
 
     /* Final norm */
-    rms_norm(x, x, m->output_norm, H);
+    if (use_layernorm)
+        layer_norm(x, x, m->output_norm, m->output_norm_bias, H);
+    else
+        rms_norm(x, x, m->output_norm, H);
 
-    /* Logits — output matvec (quantized) */
+    /* Logits */
     float *logits = malloc((size_t)m->vocab_size * sizeof(float));
     qmatvec_safe(m, m->output_data, m->output_type, x, logits, m->vocab_size, H);
 
-    /* Apply logit scale (Cohere2) */
+    /* Logit scale (Cohere2) */
     if (m->logit_scale != 1.0f) {
         for (int i = 0; i < m->vocab_size; i++) logits[i] *= m->logit_scale;
     }
 
-    free(xnorm); free(q); free(k); free(v);
+    free(xnorm); free(qkv_buf); free(q); free(k); free(v);
     free(attn_out); free(proj); free(gate); free(up); free(mlp_out);
     free(scores); free(x);
 

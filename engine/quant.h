@@ -467,4 +467,41 @@ static inline void matvec_f32(const float *mat, const float *x,
 }
 #endif
 
+/* ================================================================
+ * F16 matvec — dequant on-the-fly
+ * ================================================================ */
+
+static inline void matvec_f16(const uint16_t *mat, const float *x,
+                               float *out, int rows, int cols) {
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int i = 0; i < rows; i++) {
+        const uint16_t *row = mat + (size_t)i * cols;
+#if HAS_AVX2
+        __m256 acc = _mm256_setzero_ps();
+        int j;
+        for (j = 0; j + 8 <= cols; j += 8) {
+            /* Dequant 8 f16 values to f32 */
+            float tmp[8];
+            for (int k = 0; k < 8; k++) tmp[k] = f16_to_f32(row[j + k]);
+            __m256 r = _mm256_loadu_ps(tmp);
+            __m256 v = _mm256_loadu_ps(x + j);
+            acc = _mm256_fmadd_ps(r, v, acc);
+        }
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 s = _mm_add_ps(lo, hi);
+        s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
+        float sum = _mm_cvtss_f32(s);
+        for (; j < cols; j++) sum += f16_to_f32(row[j]) * x[j];
+        out[i] = sum;
+#else
+        float sum = 0.0f;
+        for (int j = 0; j < cols; j++) sum += f16_to_f32(row[j]) * x[j];
+        out[i] = sum;
+#endif
+    }
+}
+
 #endif /* QUANT_H */

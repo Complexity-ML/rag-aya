@@ -83,6 +83,9 @@ typedef struct {
     float    rope_theta;
     float    logit_scale;
 
+    /* Architecture (e.g. "cohere2", "llama", "gpt2") */
+    char     architecture[64];
+
     /* Tensors */
     int              n_tensors;
     gguf_tensor_info tensors[MAX_TENSORS];

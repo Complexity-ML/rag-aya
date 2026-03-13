@@ -9,7 +9,9 @@
  */
 #include "gguf.h"
 #include "model.h"
-#include "quant.h"
+#include "tokenizer.h"
+#include "sampler.h"
+#include "http.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,530 +20,181 @@
 #include <time.h>
 
 #ifdef _WIN32
-  #include <winsock2.h>
-  #include <ws2tcpip.h>
   #pragma comment(lib, "ws2_32.lib")
-  typedef int socklen_t;
-  #define CLOSE_SOCKET closesocket
-#else
-  #include <unistd.h>
-  #include <sys/socket.h>
-  #include <netinet/in.h>
-  #include <arpa/inet.h>
-  #include <sys/select.h>
-  #include <fcntl.h>
-  #define CLOSE_SOCKET close
-  typedef int SOCKET;
-  #define INVALID_SOCKET -1
 #endif
 
-static volatile int generating = 0;  /* 1 while generation in progress */
+static volatile int generating = 0;
 
-/* ---- Simple hash table for token->id lookup ---- */
+/* ---- Generation core ---- */
 
-#define HT_SIZE (1 << 19)  /* 512K buckets */
+/* Build prompt token sequence based on architecture.
+ * Cohere2: BOS + START_TURN + USER + <tokens> + END_TURN + START_TURN + CHATBOT
+ * GPT-2/other: BOS + <tokens> */
+static int *build_prompt(tokenizer_t *tk, const char *architecture,
+                         const char *prompt, int *out_len) {
+    int raw_len;
+    int *raw_ids = tokenizer_encode(tk, prompt, 0, &raw_len);
 
-typedef struct ht_entry {
-    char *key;
-    int   value;
-    struct ht_entry *next;
-} ht_entry;
+    int is_cohere = (strcmp(architecture, "cohere2") == 0 ||
+                     strcmp(architecture, "cohere") == 0 ||
+                     architecture[0] == '\0');  /* default to Cohere for compat */
 
-typedef struct {
-    ht_entry *buckets[HT_SIZE];
-} hashtable;
-
-static unsigned int ht_hash(const char *s) {
-    unsigned int h = 5381;
-    while (*s) h = h * 33 + (unsigned char)*s++;
-    return h & (HT_SIZE - 1);
-}
-
-static void ht_put(hashtable *ht, const char *key, int value) {
-    unsigned int idx = ht_hash(key);
-    ht_entry *e = malloc(sizeof(ht_entry));
-    e->key = strdup(key);
-    e->value = value;
-    e->next = ht->buckets[idx];
-    ht->buckets[idx] = e;
-}
-
-static int ht_get(hashtable *ht, const char *key, int *out) {
-    unsigned int idx = ht_hash(key);
-    for (ht_entry *e = ht->buckets[idx]; e; e = e->next) {
-        if (strcmp(e->key, key) == 0) { *out = e->value; return 1; }
+    if (is_cohere) {
+        /* Cohere chat template */
+        int n = 3 + raw_len + 3;
+        int *ids = malloc(n * sizeof(int));
+        ids[0] = 2;  /* BOS */
+        ids[1] = 5;  /* START_OF_TURN */
+        ids[2] = 7;  /* USER */
+        memcpy(ids + 3, raw_ids, raw_len * sizeof(int));
+        ids[3 + raw_len]     = 6;  /* END_OF_TURN */
+        ids[3 + raw_len + 1] = 5;  /* START_OF_TURN */
+        ids[3 + raw_len + 2] = 8;  /* CHATBOT */
+        free(raw_ids);
+        *out_len = n;
+        printf("  Encoded %d tokens (Cohere chat template)\n", n);
+        return ids;
+    } else {
+        /* GPT-2 / generic: BOS + raw tokens */
+        int n = 1 + raw_len;
+        int *ids = malloc(n * sizeof(int));
+        ids[0] = tk->bos_id;
+        memcpy(ids + 1, raw_ids, raw_len * sizeof(int));
+        free(raw_ids);
+        *out_len = n;
+        printf("  Encoded %d tokens (raw + BOS)\n", n);
+        return ids;
     }
-    return 0;
 }
 
-/* ---- Tokenizer ---- */
+/* Shared generation loop — works for both stream and non-stream.
+ * Returns number of tokens generated. */
+static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
+                           int *input_ids, int n_tokens, sample_params_t sp,
+                           int max_tokens, int min_tokens, float rep_penalty,
+                           int stream, SOCKET client) {
+    int pos = 0;
+    float *logits = NULL;
 
-typedef struct {
-    char     **tokens;
-    int        vocab_size;
-    int        bos_id;
-    int        eos_id;
-    hashtable  tok2id;
-    /* BPE merge rules: merge_a[i] + merge_b[i] -> merge_result[i], priority = i */
-    char     **merges;      /* raw merge strings "token_a token_b" */
-    int        n_merges;
-    hashtable  merge_rank;  /* "token_a\x00token_b" -> rank (lower = higher priority) */
-} tokenizer_t;
-
-static tokenizer_t *tokenizer_from_gguf(gguf_file *gguf) {
-    tokenizer_t *tk = calloc(1, sizeof(tokenizer_t));
-    tk->tokens     = gguf->vocab_tokens;
-    tk->vocab_size = gguf->vocab_size;
-    tk->bos_id     = gguf->bos_id;
-    tk->eos_id     = gguf->eos_id;
-
-    /* Build token->id hash table */
-    printf("  Building vocab hash table (%d tokens)...\n", tk->vocab_size);
-    for (int i = 0; i < tk->vocab_size; i++) {
-        if (gguf->vocab_tokens[i]) {
-            ht_put(&tk->tok2id, gguf->vocab_tokens[i], i);
+    /* Prefill */
+    printf("  Prefill %d tokens...\n", n_tokens); fflush(stdout);
+    for (int i = 0; i < n_tokens; i++) {
+        if (logits) free(logits);
+        logits = model_forward(model, cache, input_ids[i], pos);
+        pos++;
+        if ((i + 1) % 50 == 0 || i == n_tokens - 1) {
+            printf("  Prefill %d/%d\n", i + 1, n_tokens);
+            fflush(stdout);
         }
     }
+    printf("  Prefill done, generating...\n"); fflush(stdout);
 
-    /* Build merge rank table */
-    tk->merges = gguf->merges;
-    tk->n_merges = gguf->n_merges;
-    if (tk->n_merges > 0) {
-        printf("  Building merge rank table (%d merges)...\n", tk->n_merges);
-        for (int i = 0; i < tk->n_merges; i++) {
-            /* Merge format: "token_a token_b" — store as "token_a\x01token_b" */
-            char *m = tk->merges[i];
-            char key[256];
-            /* Find first space */
-            char *sp = strchr(m, ' ');
-            if (!sp) continue;
-            int la = (int)(sp - m);
-            int lb = (int)strlen(sp + 1);
-            if (la + 1 + lb >= 255) continue;
-            memcpy(key, m, la);
-            key[la] = '\x01';  /* separator */
-            memcpy(key + la + 1, sp + 1, lb);
-            key[la + 1 + lb] = '\0';
-            ht_put(&tk->merge_rank, key, i);
-        }
+    /* Generation state */
+    int *gen_ids = malloc(max_tokens * sizeof(int));
+    int gen_count = 0;
+    int consecutive_newlines = 0;
+
+    /* Response buffer (non-stream) */
+    char *response = NULL;
+    int resp_len = 0;
+    if (!stream) {
+        response = calloc(max_tokens * 64 + 1, 1);
+    } else {
+        send_sse_start(client);
     }
 
-    return tk;
-}
-
-static int tok_lookup(tokenizer_t *tk, const char *s) {
-    int id;
-    if (ht_get(&tk->tok2id, s, &id)) return id;
-    return -1;
-}
-
-/* BPE encode */
-static int *tokenizer_encode(tokenizer_t *tk, const char *text,
-                              int add_bos, int *out_len) {
-    int cap = 4096;
-    int *ids = malloc(cap * sizeof(int));
-    int n = 0;
-
-    if (add_bos) ids[n++] = tk->bos_id;
-
-    /* Start with individual UTF-8 bytes/chars as tokens */
-    int text_len = (int)strlen(text);
-    int i = 0;
-    while (i < text_len) {
-        /* Try longest match first (up to 32 chars) */
-        int best_len = 0, best_id = -1;
-        int max_try = text_len - i;
-        if (max_try > 32) max_try = 32;
-
-        for (int len = max_try; len >= 1; len--) {
-            char sub[64];
-            if (len >= 64) continue;
-            memcpy(sub, text + i, len);
-            sub[len] = '\0';
-
-            int id = tok_lookup(tk, sub);
-            if (id >= 0) { best_len = len; best_id = id; break; }
-
-            /* Try with sentencepiece space prefix (▁ = 0xE2 0x96 0x81) */
-            if (i == 0 || (i > 0 && text[i - 1] == ' ')) {
-                if (len + 3 < 64) {
-                    char buf[64];
-                    buf[0] = '\xe2'; buf[1] = '\x96'; buf[2] = '\x81';
-                    memcpy(buf + 3, sub, len + 1);
-                    id = tok_lookup(tk, buf);
-                    if (id >= 0) { best_len = len; best_id = id; break; }
-                }
+    for (int t = 0; t < max_tokens; t++) {
+        /* Repetition penalty */
+        if (rep_penalty != 1.0f) {
+            for (int g = 0; g < gen_count; g++) {
+                int id = gen_ids[g];
+                if (logits[id] > 0) logits[id] /= rep_penalty;
+                else                 logits[id] *= rep_penalty;
             }
         }
 
-        if (best_id >= 0) {
-            if (n >= cap) { cap *= 2; ids = realloc(ids, cap * sizeof(int)); }
-            ids[n++] = best_id;
-            i += best_len;
-        } else {
-            /* Byte fallback */
-            unsigned char byte = (unsigned char)text[i];
-            char bytename[16];
-            snprintf(bytename, sizeof(bytename), "<0x%02X>", byte);
-            int id = tok_lookup(tk, bytename);
-            if (id >= 0) {
-                if (n >= cap) { cap *= 2; ids = realloc(ids, cap * sizeof(int)); }
-                ids[n++] = id;
-            }
-            i++;
+        int next;
+        if (sp.temperature <= 0)
+            next = argmax_fn(logits, model->vocab_size);
+        else
+            next = sample_advanced(logits, model->vocab_size, sp);
+
+        /* EOS check */
+        if ((next == tk->eos_id || next == 3 || next == 6) && t >= min_tokens) break;
+        if (next == tk->eos_id || next == 3 || next == 6) {
+            logits[next] = -1e30f;
+            next = sample_advanced(logits, model->vocab_size, sp);
         }
-    }
+        gen_ids[gen_count++] = next;
 
-    /* BPE merge pass using merge ranks */
-    if (tk->n_merges > 0) {
-        int changed = 1;
-        while (changed) {
-            changed = 0;
-            int best_rank = tk->n_merges; /* lower = higher priority */
-            int best_idx = -1;
-
-            for (int j = 0; j < n - 1; j++) {
-                const char *a = tk->tokens[ids[j]];
-                const char *b = tk->tokens[ids[j + 1]];
-                if (!a || !b) continue;
-                int la = (int)strlen(a), lb = (int)strlen(b);
-                if (la + 1 + lb >= 255) continue;
-
-                /* Build merge key "a\x01b" */
-                char key[256];
-                memcpy(key, a, la);
-                key[la] = '\x01';
-                memcpy(key + la + 1, b, lb);
-                key[la + 1 + lb] = '\0';
-
-                int rank;
-                if (ht_get(&tk->merge_rank, key, &rank) && rank < best_rank) {
-                    /* Check merged token exists in vocab */
-                    char merged[256];
-                    memcpy(merged, a, la);
-                    memcpy(merged + la, b, lb);
-                    merged[la + lb] = '\0';
-                    int mid = tok_lookup(tk, merged);
-                    if (mid >= 0) {
-                        best_rank = rank;
-                        best_idx = j;
-                    }
-                }
-            }
-
-            if (best_idx >= 0) {
-                const char *a = tk->tokens[ids[best_idx]];
-                const char *b = tk->tokens[ids[best_idx + 1]];
-                char merged[256];
-                int la = (int)strlen(a), lb = (int)strlen(b);
-                memcpy(merged, a, la);
-                memcpy(merged + la, b, lb);
-                merged[la + lb] = '\0';
-                ids[best_idx] = tok_lookup(tk, merged);
-                memmove(ids + best_idx + 1, ids + best_idx + 2,
-                        (n - best_idx - 2) * sizeof(int));
-                n--;
-                changed = 1;
-            }
-        }
-    }
-
-    *out_len = n;
-    return ids;
-}
-
-/* Decode a single token to string (replaces ▁ with space) */
-static const char *tokenizer_decode(tokenizer_t *tk, int id) {
-    if (id < 0 || id >= tk->vocab_size || !tk->tokens[id]) return "";
-    return tk->tokens[id];
-}
-
-/* ---- Sampling ---- */
-
-static int argmax_fn(const float *logits, int n) {
-    int best = 0;
-    float best_val = logits[0];
-    for (int i = 1; i < n; i++) {
-        if (logits[i] > best_val) { best_val = logits[i]; best = i; }
-    }
-    return best;
-}
-
-static int sample_topk(const float *logits, int vocab_size,
-                        int top_k, float temperature) {
-    int *indices = malloc(top_k * sizeof(int));
-    float *vals  = malloc(top_k * sizeof(float));
-
-    for (int i = 0; i < top_k; i++) { indices[i] = -1; vals[i] = -1e30f; }
-
-    for (int v = 0; v < vocab_size; v++) {
-        float val = logits[v];
-        if (val > vals[top_k - 1]) {
-            vals[top_k - 1] = val;
-            indices[top_k - 1] = v;
-            for (int j = top_k - 1; j > 0 && vals[j] > vals[j - 1]; j--) {
-                float tv = vals[j]; vals[j] = vals[j - 1]; vals[j - 1] = tv;
-                int ti = indices[j]; indices[j] = indices[j - 1]; indices[j - 1] = ti;
-            }
-        }
-    }
-
-    float max_val = vals[0];
-    float sum = 0.0f;
-    for (int i = 0; i < top_k && indices[i] >= 0; i++) {
-        vals[i] = expf((vals[i] - max_val) / temperature);
-        sum += vals[i];
-    }
-    for (int i = 0; i < top_k && indices[i] >= 0; i++) vals[i] /= sum;
-
-    float r = (float)rand() / (float)RAND_MAX;
-    float cum = 0.0f;
-    int result = indices[0];
-    for (int i = 0; i < top_k && indices[i] >= 0; i++) {
-        cum += vals[i];
-        if (r <= cum) { result = indices[i]; break; }
-    }
-
-    free(indices);
-    free(vals);
-    return result;
-}
-
-/* Sampling parameters */
-typedef struct {
-    int   top_k;
-    float top_p;
-    float min_p;
-    float temperature;
-} sample_params_t;
-
-static int sample_advanced(const float *logits, int vocab_size,
-                            sample_params_t sp) {
-    /* Step 1: find top-K candidates (upper bound for all filters) */
-    int cap = sp.top_k > 0 ? sp.top_k : 256;
-    if (cap > vocab_size) cap = vocab_size;
-    /* Use larger pool when top-p is active */
-    if (sp.top_p > 0.0f && sp.top_p < 1.0f && cap < 1024)
-        cap = vocab_size < 1024 ? vocab_size : 1024;
-
-    int *indices = malloc(cap * sizeof(int));
-    float *vals  = malloc(cap * sizeof(float));
-    for (int i = 0; i < cap; i++) { indices[i] = -1; vals[i] = -1e30f; }
-
-    for (int v = 0; v < vocab_size; v++) {
-        float val = logits[v];
-        if (val > vals[cap - 1]) {
-            vals[cap - 1] = val;
-            indices[cap - 1] = v;
-            for (int j = cap - 1; j > 0 && vals[j] > vals[j - 1]; j--) {
-                float tv = vals[j]; vals[j] = vals[j - 1]; vals[j - 1] = tv;
-                int ti = indices[j]; indices[j] = indices[j - 1]; indices[j - 1] = ti;
-            }
-        }
-    }
-
-    /* Step 2: softmax with temperature */
-    float max_val = vals[0];
-    float sum = 0.0f;
-    int count = 0;
-    for (int i = 0; i < cap && indices[i] >= 0; i++) {
-        vals[i] = expf((vals[i] - max_val) / sp.temperature);
-        sum += vals[i];
-        count++;
-    }
-    for (int i = 0; i < count; i++) vals[i] /= sum;
-
-    /* Step 3: min-p filter — remove tokens with prob < min_p * max_prob */
-    int n_keep = count;
-    if (sp.min_p > 0.0f) {
-        float threshold = sp.min_p * vals[0];  /* vals[0] is max after softmax */
-        n_keep = 0;
-        for (int i = 0; i < count; i++) {
-            if (vals[i] >= threshold) n_keep++;
-            else break;  /* sorted descending, so rest are also below */
-        }
-        if (n_keep == 0) n_keep = 1;  /* always keep at least the best */
-    }
-
-    /* Step 4: top-p (nucleus) filter */
-    if (sp.top_p > 0.0f && sp.top_p < 1.0f) {
-        float cum = 0.0f;
-        int p_keep = 0;
-        for (int i = 0; i < n_keep; i++) {
-            cum += vals[i];
-            p_keep++;
-            if (cum >= sp.top_p) break;
-        }
-        n_keep = p_keep;
-    }
-
-    /* Step 5: re-normalize */
-    float kept_sum = 0.0f;
-    for (int i = 0; i < n_keep; i++) kept_sum += vals[i];
-    for (int i = 0; i < n_keep; i++) vals[i] /= kept_sum;
-
-    /* Step 6: sample */
-    float r = (float)rand() / (float)RAND_MAX;
-    float cum = 0.0f;
-    int result = indices[0];
-    for (int i = 0; i < n_keep; i++) {
-        cum += vals[i];
-        if (r <= cum) { result = indices[i]; break; }
-    }
-
-    free(indices);
-    free(vals);
-    return result;
-}
-
-/* ---- JSON helpers (minimal) ---- */
-
-static const char *json_get_string(const char *json, const char *key, char *buf, int buf_sz) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return NULL;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (*p != '"') return NULL;
-    p++;
-    int i = 0;
-    while (*p && *p != '"' && i < buf_sz - 1) {
-        if (*p == '\\' && *(p + 1)) {
-            p++;
-            if (*p == 'n') buf[i++] = '\n';
-            else if (*p == 't') buf[i++] = '\t';
-            else if (*p == '"') buf[i++] = '"';
-            else if (*p == '\\') buf[i++] = '\\';
-            else buf[i++] = *p;
-        } else {
-            buf[i++] = *p;
-        }
-        p++;
-    }
-    buf[i] = '\0';
-    return buf;
-}
-
-static int json_get_int(const char *json, const char *key, int default_val) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return default_val;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    return atoi(p);
-}
-
-static float json_get_float(const char *json, const char *key, float default_val) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) return default_val;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    return (float)atof(p);
-}
-
-/* ---- GPT-2 BPE byte decoder ----
- * GPT-2 tokenizers map bytes to unicode codepoints:
- *   "safe" bytes (33-126, 161-172, 174-255) → identity
- *   other bytes (0-32, 127-160, 173) → U+0100 + index
- * We reverse this to get raw bytes back. */
-
-static void decode_token_str(const char *tok_str, char *out, int out_sz) {
-    int di = 0, i = 0;
-    while (tok_str[i] && di < out_sz - 1) {
-        unsigned char c = (unsigned char)tok_str[i];
-        uint32_t cp;
-        int nbytes;
-
-        /* Parse UTF-8 codepoint */
-        if (c < 0x80) {
-            cp = c; nbytes = 1;
-        } else if ((c & 0xE0) == 0xC0 && tok_str[i+1]) {
-            cp = ((c & 0x1F) << 6) | ((unsigned char)tok_str[i+1] & 0x3F);
-            nbytes = 2;
-        } else if ((c & 0xF0) == 0xE0 && tok_str[i+1] && tok_str[i+2]) {
-            cp = ((c & 0x0F) << 12) | (((unsigned char)tok_str[i+1] & 0x3F) << 6)
-                 | ((unsigned char)tok_str[i+2] & 0x3F);
-            nbytes = 3;
-        } else {
-            out[di++] = tok_str[i++];
+        /* Skip special tokens */
+        const char *tok_text = tokenizer_decode(tk, next);
+        if (next <= 9 || (tok_text[0] == '<' && tok_text[1] == '|')) {
+            free(logits); logits = model_forward(model, cache, next, pos); pos++;
             continue;
         }
 
-        /* Reverse GPT-2 byte mapping */
-        if ((cp >= 33 && cp <= 126) || (cp >= 161 && cp <= 172) || (cp >= 174 && cp <= 255)) {
-            /* Identity-mapped "safe" bytes */
-            out[di++] = (char)cp;
-        } else if (cp >= 256) {
-            /* Remapped bytes: 0-32 → U+0100..U+0120, 127-160 → U+0121..U+0142, 173 → U+0143 */
-            int idx = (int)(cp - 256);
-            uint8_t byte;
-            if (idx <= 32)       byte = (uint8_t)idx;          /* bytes 0-32 (space=32) */
-            else if (idx <= 66)  byte = (uint8_t)(127 + idx - 33); /* bytes 127-160 */
-            else                 byte = 173;                    /* byte 173 */
-            out[di++] = (char)byte;
-        } else {
-            /* Shouldn't happen in GPT-2 vocab, pass through as UTF-8 */
-            for (int b = 0; b < nbytes && di < out_sz - 1; b++)
-                out[di++] = tok_str[i + b];
+        char decoded[256];
+        decode_token_str(tok_text, decoded, sizeof(decoded));
+
+        /* Filter [[ artifacts */
+        if (decoded[0] == '[' && decoded[1] == '[') {
+            free(logits); logits = model_forward(model, cache, next, pos); pos++;
+            continue;
         }
-        i += nbytes;
+
+        /* Consecutive newline stop */
+        if (strcmp(decoded, "\n") == 0 || strcmp(decoded, "\n\n") == 0)
+            consecutive_newlines++;
+        else
+            consecutive_newlines = 0;
+        if (consecutive_newlines >= 3 && t >= min_tokens) break;
+
+        if (stream) {
+            send_sse_token(client, decoded);
+        } else {
+            int dlen = (int)strlen(decoded);
+            memcpy(response + resp_len, decoded, dlen);
+            resp_len += dlen;
+        }
+
+        free(logits);
+        logits = model_forward(model, cache, next, pos);
+        pos++;
     }
-    out[di] = '\0';
-}
 
-/* ---- HTTP server ---- */
+    int tokens_generated = pos - n_tokens;
 
-static void send_response(SOCKET sock, int status, const char *status_text,
-                           const char *content_type, const char *body) {
-    char header[512];
-    int body_len = (int)strlen(body);
-    snprintf(header, sizeof(header),
-        "HTTP/1.1 %d %s\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %d\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        status, status_text, content_type, body_len);
-    send(sock, header, (int)strlen(header), 0);
-    send(sock, body, body_len, 0);
-}
+    if (stream) {
+        send_sse_done(client);
+    } else {
+        response[resp_len] = '\0';
 
-static void send_sse_start(SOCKET sock) {
-    const char *header =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Cache-Control: no-cache\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n";
-    send(sock, header, (int)strlen(header), 0);
-}
+        /* Build JSON response */
+        char *escaped = malloc(resp_len * 2 + 1);
+        int ej = 0;
+        for (int c = 0; c < resp_len; c++) {
+            if (response[c] == '"') { escaped[ej++] = '\\'; escaped[ej++] = '"'; }
+            else if (response[c] == '\\') { escaped[ej++] = '\\'; escaped[ej++] = '\\'; }
+            else if (response[c] == '\n') { escaped[ej++] = '\\'; escaped[ej++] = 'n'; }
+            else escaped[ej++] = response[c];
+        }
+        escaped[ej] = '\0';
 
-static void send_sse_token(SOCKET sock, const char *token) {
-    char buf[512];
-    char escaped[256];
-    int j = 0;
-    for (int i = 0; token[i] && j < 250; i++) {
-        if (token[i] == '"') { escaped[j++] = '\\'; escaped[j++] = '"'; }
-        else if (token[i] == '\\') { escaped[j++] = '\\'; escaped[j++] = '\\'; }
-        else if (token[i] == '\n') { escaped[j++] = '\\'; escaped[j++] = 'n'; }
-        else escaped[j++] = token[i];
+        char *json_resp = malloc(ej + 256);
+        snprintf(json_resp, ej + 256,
+            "{\"text\":\"%s\",\"tokens_generated\":%d}", escaped, tokens_generated);
+        send_response(client, 200, "OK", "application/json", json_resp);
+
+        free(json_resp);
+        free(escaped);
+        free(response);
     }
-    escaped[j] = '\0';
-    snprintf(buf, sizeof(buf), "data: {\"token\":\"%s\"}\n\n", escaped);
-    send(sock, buf, (int)strlen(buf), 0);
-}
 
-static void send_sse_done(SOCKET sock) {
-    const char *msg = "data: [DONE]\n\n";
-    send(sock, msg, (int)strlen(msg), 0);
+    if (logits) free(logits);
+    free(gen_ids);
+
+    return tokens_generated;
 }
 
 /* ---- Main ---- */
@@ -579,6 +232,7 @@ int main(int argc, char **argv) {
     tokenizer_t *tk = tokenizer_from_gguf(gguf);
     printf("Tokenizer: %d tokens, %d merges, BOS=%d, EOS=%d\n",
            tk->vocab_size, tk->n_merges, tk->bos_id, tk->eos_id);
+    printf("Architecture: %s\n", model->architecture);
     fflush(stdout);
 
     /* Quick tokenizer test */
@@ -590,37 +244,6 @@ int main(int argc, char **argv) {
         printf("]\n");
         fflush(stdout);
         free(ids);
-    }
-
-    /* Dump some token strings to diagnose BPE encoding */
-    {
-        printf("\n=== Token dump (space-related) ===\n");
-        /* Look for tokens containing common words with spaces */
-        int sample_ids[] = {31621, 43791, 5, 10, 100, 500, 1000};
-        int n_samples = sizeof(sample_ids) / sizeof(sample_ids[0]);
-        for (int s = 0; s < n_samples; s++) {
-            int id = sample_ids[s];
-            if (id < tk->vocab_size && tk->tokens[id]) {
-                const char *t = tk->tokens[id];
-                printf("  token[%d] = \"", id);
-                for (int c = 0; t[c]; c++) printf("%c", t[c]);
-                printf("\" hex=[");
-                for (int c = 0; t[c]; c++) printf("%02X ", (unsigned char)t[c]);
-                printf("]\n");
-            }
-        }
-        /* Check Cohere special tokens */
-        const char *specials[] = {
-            "<|START_OF_TURN_TOKEN|>", "<|END_OF_TURN_TOKEN|>",
-            "<|USER_TOKEN|>", "<|CHATBOT_TOKEN|>", "<|SYSTEM_TOKEN|>",
-            "<BOS_TOKEN>", "<EOS_TOKEN>"
-        };
-        for (int p = 0; p < 7; p++) {
-            int id = tok_lookup(tk, specials[p]);
-            printf("  lookup(\"%s\") = %d\n", specials[p], id);
-        }
-        printf("=================================\n\n");
-        fflush(stdout);
     }
 
     /* Create server socket */
@@ -684,8 +307,11 @@ int main(int argc, char **argv) {
         }
 
         if (strcmp(path, "/health") == 0) {
-            send_response(client, 200, "OK", "application/json",
-                "{\"status\":\"ok\",\"model\":\"aya-integer\"}");
+            char health[256];
+            snprintf(health, sizeof(health),
+                "{\"status\":\"ok\",\"model\":\"aya-engine\",\"architecture\":\"%s\"}",
+                model->architecture);
+            send_response(client, 200, "OK", "application/json", health);
             CLOSE_SOCKET(client);
             continue;
         }
@@ -700,7 +326,7 @@ int main(int argc, char **argv) {
         if (strcmp(path, "/generate") == 0 && strcmp(method, "POST") == 0) {
             generating = 1;
             const char *body = strstr(req_buf, "\r\n\r\n");
-            if (!body) { CLOSE_SOCKET(client); continue; }
+            if (!body) { CLOSE_SOCKET(client); generating = 0; continue; }
             body += 4;
 
             char prompt[32768];
@@ -708,6 +334,7 @@ int main(int argc, char **argv) {
                 send_response(client, 400, "Bad Request", "application/json",
                     "{\"error\":\"missing prompt\"}");
                 CLOSE_SOCKET(client);
+                generating = 0;
                 continue;
             }
 
@@ -726,187 +353,23 @@ int main(int argc, char **argv) {
                    max_tokens, temperature, top_k, top_p, min_p, rep_penalty);
             fflush(stdout);
 
-            /* Reset KV cache for new request */
+            /* Reset KV cache */
             memset(cache->key_cache, 0,
                    (size_t)cache->num_layers * cache->max_seq * cache->kv_dim * sizeof(float));
             memset(cache->value_cache, 0,
                    (size_t)cache->num_layers * cache->max_seq * cache->kv_dim * sizeof(float));
 
-            /* Build Cohere chat template:
-             * BOS(2) + START_TURN(5) + USER(7) + <prompt tokens> +
-             * END_TURN(6) + START_TURN(5) + CHATBOT(8) */
-            int raw_len;
-            int *raw_ids = tokenizer_encode(tk, prompt, 0, &raw_len);  /* no BOS */
-            int n_tokens = 3 + raw_len + 3;  /* prefix + prompt + suffix */
-            int *input_ids = malloc(n_tokens * sizeof(int));
-            input_ids[0] = 2;  /* BOS */
-            input_ids[1] = 5;  /* START_OF_TURN */
-            input_ids[2] = 7;  /* USER */
-            memcpy(input_ids + 3, raw_ids, raw_len * sizeof(int));
-            input_ids[3 + raw_len]     = 6;  /* END_OF_TURN */
-            input_ids[3 + raw_len + 1] = 5;  /* START_OF_TURN */
-            input_ids[3 + raw_len + 2] = 8;  /* CHATBOT */
-            free(raw_ids);
-            printf("  Encoded %d tokens (with chat template)\n", n_tokens);
-            fflush(stdout);
+            /* Build prompt with architecture-appropriate template */
+            int n_tokens;
+            int *input_ids = build_prompt(tk, model->architecture, prompt, &n_tokens);
 
-            int pos = 0;
-            float *logits = NULL;
-            printf("  Prefill %d tokens...\n", n_tokens); fflush(stdout);
-            for (int i = 0; i < n_tokens; i++) {
-                if (logits) free(logits);
-                logits = model_forward(model, cache, input_ids[i], pos);
-                pos++;
-                if ((i + 1) % 50 == 0 || i == n_tokens - 1) {
-                    printf("  Prefill %d/%d\n", i + 1, n_tokens);
-                    fflush(stdout);
-                }
-            }
-            printf("  Prefill done, generating...\n"); fflush(stdout);
+            int gen = generate_tokens(model, cache, tk, input_ids, n_tokens,
+                                      sp, max_tokens, min_tokens, rep_penalty,
+                                      stream, client);
 
-            /* Repetition penalty: track generated token IDs */
-            int *gen_ids = malloc(max_tokens * sizeof(int));
-            int gen_count = 0;
-            int consecutive_newlines = 0;  /* stop on double newline (model done) */
-
-            if (stream) {
-                send_sse_start(client);
-                for (int t = 0; t < max_tokens; t++) {
-                    /* Apply repetition penalty to already-generated tokens */
-                    if (rep_penalty != 1.0f) {
-                        for (int g = 0; g < gen_count; g++) {
-                            int id = gen_ids[g];
-                            if (logits[id] > 0) logits[id] /= rep_penalty;
-                            else                 logits[id] *= rep_penalty;
-                        }
-                    }
-
-                    int next;
-                    if (temperature <= 0)
-                        next = argmax_fn(logits, model->vocab_size);
-                    else
-                        next = sample_advanced(logits, model->vocab_size, sp);
-
-                    /* Stop on EOS or special control tokens (but not before min_tokens) */
-                    if ((next == tk->eos_id || next == 3 || next == 6) && t >= min_tokens) break;
-                    if (next == tk->eos_id || next == 3 || next == 6) {
-                        logits[next] = -1e30f;  /* suppress EOS and resample */
-                        next = sample_advanced(logits, model->vocab_size, sp);
-                    }
-                    gen_ids[gen_count++] = next;
-
-                    /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
-                    const char *tok_text = tokenizer_decode(tk, next);
-                    if (next <= 9 || (tok_text[0] == '<' && tok_text[1] == '|')) {
-                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
-                    }
-
-                    char decoded[256];
-                    decode_token_str(tok_text, decoded, sizeof(decoded));
-
-                    /* Filter bracket artifacts like [[ ]] */
-                    if (decoded[0] == '[' && decoded[1] == '[') {
-                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
-                    }
-
-                    /* Track consecutive newlines — stop if model outputs 2+ blank lines */
-                    if (strcmp(decoded, "\n") == 0 || strcmp(decoded, "\n\n") == 0)
-                        consecutive_newlines++;
-                    else
-                        consecutive_newlines = 0;
-                    if (consecutive_newlines >= 3 && t >= min_tokens) break;
-
-                    send_sse_token(client, decoded);
-
-                    free(logits);
-                    logits = model_forward(model, cache, next, pos);
-                    pos++;
-                }
-                send_sse_done(client);
-            } else {
-                char *response = calloc(max_tokens * 64 + 1, 1);
-                int resp_len = 0;
-
-                for (int t = 0; t < max_tokens; t++) {
-                    /* Apply repetition penalty to already-generated tokens */
-                    if (rep_penalty != 1.0f) {
-                        for (int g = 0; g < gen_count; g++) {
-                            int id = gen_ids[g];
-                            if (logits[id] > 0) logits[id] /= rep_penalty;
-                            else                 logits[id] *= rep_penalty;
-                        }
-                    }
-
-                    int next;
-                    if (temperature <= 0)
-                        next = argmax_fn(logits, model->vocab_size);
-                    else
-                        next = sample_advanced(logits, model->vocab_size, sp);
-
-                    /* Stop on EOS or special control tokens (but not before min_tokens) */
-                    if ((next == tk->eos_id || next == 3 || next == 6) && t >= min_tokens) break;
-                    if (next == tk->eos_id || next == 3 || next == 6) {
-                        logits[next] = -1e30f;
-                        next = sample_advanced(logits, model->vocab_size, sp);
-                    }
-                    gen_ids[gen_count++] = next;
-                    /* Skip special tokens in output (IDs 0-9 or <|...|> tokens) */
-                    const char *tok_text = tokenizer_decode(tk, next);
-                    if (next <= 9 || (tok_text[0] == '<' && tok_text[1] == '|')) {
-                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
-                    }
-
-                    char decoded[256];
-                    decode_token_str(tok_text, decoded, sizeof(decoded));
-
-                    /* Filter bracket artifacts like [[ ]] */
-                    if (decoded[0] == '[' && decoded[1] == '[') {
-                        free(logits); logits = model_forward(model, cache, next, pos); pos++; continue;
-                    }
-
-                    /* Track consecutive newlines — stop if model outputs 2+ blank lines */
-                    if (strcmp(decoded, "\n") == 0 || strcmp(decoded, "\n\n") == 0)
-                        consecutive_newlines++;
-                    else
-                        consecutive_newlines = 0;
-                    if (consecutive_newlines >= 3 && t >= min_tokens) break;
-
-                    int dlen = (int)strlen(decoded);
-                    memcpy(response + resp_len, decoded, dlen);
-                    resp_len += dlen;
-
-                    free(logits);
-                    logits = model_forward(model, cache, next, pos);
-                    pos++;
-                }
-                response[resp_len] = '\0';
-
-                /* Build JSON response */
-                char *escaped = malloc(resp_len * 2 + 1);
-                int ej = 0;
-                for (int c = 0; c < resp_len; c++) {
-                    if (response[c] == '"') { escaped[ej++] = '\\'; escaped[ej++] = '"'; }
-                    else if (response[c] == '\\') { escaped[ej++] = '\\'; escaped[ej++] = '\\'; }
-                    else if (response[c] == '\n') { escaped[ej++] = '\\'; escaped[ej++] = 'n'; }
-                    else escaped[ej++] = response[c];
-                }
-                escaped[ej] = '\0';
-
-                char *json_resp = malloc(ej + 256);
-                snprintf(json_resp, ej + 256,
-                    "{\"text\":\"%s\",\"tokens_generated\":%d}", escaped, pos - n_tokens);
-                send_response(client, 200, "OK", "application/json", json_resp);
-
-                free(json_resp);
-                free(escaped);
-                free(response);
-            }
-
-            if (logits) free(logits);
             free(input_ids);
-            free(gen_ids);
             generating = 0;
-            printf("  Generated %d tokens\n", pos - n_tokens);
+            printf("  Generated %d tokens\n", gen);
             fflush(stdout);
 
         } else if (strcmp(path, "/generate") == 0) {

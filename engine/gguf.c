@@ -110,6 +110,23 @@ static int gguf_parse(gguf_file *f) {
         if      (strncmp(key, "llama.", 6) == 0)   suffix = key + 6;
         else if (strncmp(key, "cohere2.", 8) == 0)  suffix = key + 8;
         else if (strncmp(key, "cohere.", 7) == 0)   suffix = key + 7;
+        else if (strncmp(key, "gpt2.", 5) == 0)     suffix = key + 5;
+        else if (strncmp(key, "gptneox.", 8) == 0)  suffix = key + 8;
+        else if (strncmp(key, "phi.", 4) == 0)      suffix = key + 4;
+
+        /* Parse architecture name */
+        if (strcmp(key, "general.architecture") == 0) {
+            if (vtype == GGUF_TYPE_STRING) {
+                char *arch = rd_string(&r);
+                strncpy(f->architecture, arch, sizeof(f->architecture) - 1);
+                free(arch);
+                printf("  Architecture: %s\n", f->architecture);
+            } else {
+                skip_value(&r, vtype);
+            }
+            free(key);
+            continue;
+        }
 
         if (strcmp(suffix, "embedding_length") == 0) {
             f->hidden_size = (int)rd_u32(&r);
