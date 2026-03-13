@@ -616,7 +616,7 @@ int main(int argc, char **argv) {
             if (!body) { CLOSE_SOCKET(client); continue; }
             body += 4;
 
-            char prompt[4096];
+            char prompt[32768];
             if (!json_get_string(body, "prompt", prompt, sizeof(prompt))) {
                 send_response(client, 400, "Bad Request", "application/json",
                     "{\"error\":\"missing prompt\"}");
