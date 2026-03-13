@@ -69,11 +69,23 @@ class Retriever:
 
         return results
 
-    def get_context(self, query: str, k: int = 5) -> str:
-        """Search and format results as context string."""
-        results = self.search(query, k=k)
+    def get_context(self, query: str, k: int = 5, prefer_lang: str = None) -> str:
+        """Search and format results as context string.
+        If prefer_lang is set, prioritize chunks in that language to avoid
+        confusing small models with mixed-language context."""
+        results = self.search(query, k=k * 2 if prefer_lang else k)
         if not results:
             return ""
+        if prefer_lang:
+            # Map short codes
+            lang_map = {"en": "eng", "fr": "fra", "eng": "eng", "fra": "fra"}
+            lang = lang_map.get(prefer_lang, prefer_lang)
+            same_lang = [(c, s) for c, s in results if c.language == lang]
+            other = [(c, s) for c, s in results if c.language != lang]
+            # Take same-lang first, fill with other if needed
+            results = (same_lang + other)[:k]
+        else:
+            results = results[:k]
         parts = []
         for chunk, score in results:
             parts.append(f"[{chunk.language}|{chunk.doc_id}] {chunk.text}")

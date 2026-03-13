@@ -76,7 +76,11 @@ def cmd_query(config: Config, query: str):
 
     logger.info("Query: %s", query)
 
-    context = retriever.get_context(query, k=config.top_k)
+    # Detect query language for chunk filtering
+    has_accent = any(c in query for c in "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ")
+    query_lang = "fra" if has_accent else "eng"
+
+    context = retriever.get_context(query, k=config.top_k, prefer_lang=query_lang)
     if not context:
         logger.warning("No relevant documents found.")
         return

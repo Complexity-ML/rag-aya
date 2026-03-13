@@ -144,8 +144,12 @@ class RagAyaServer:
         if not query:
             return web.json_response({"error": "query is required"}, status=400)
 
-        # Retrieve context
-        context = await self._run_in_pool(self.retriever.get_context, query, k)
+        # Detect query language for chunk filtering
+        has_accent = any(c in query for c in "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ")
+        query_lang = language or ("fra" if has_accent else "eng")
+
+        # Retrieve context (prefer same-language chunks)
+        context = await self._run_in_pool(self.retriever.get_context, query, k, query_lang)
 
         # Generate with Aya
         result = await self._run_in_pool(
