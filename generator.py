@@ -208,6 +208,7 @@ class AyaEngineGenerator:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_k": 40,
+            "repetition_penalty": 1.2,
             "stream": 1,
         }).encode()
 
