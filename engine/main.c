@@ -159,6 +159,15 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
         char decoded[256];
         decode_token_str(tok_text, decoded, sizeof(decoded));
 
+        /* Debug: show raw token bytes for first 10 tokens */
+        if (t < 10) {
+            printf("  T%d id=%d raw='%s' hex=[", t, next, tok_text);
+            for (int b = 0; tok_text[b]; b++)
+                printf("%02x ", (unsigned char)tok_text[b]);
+            printf("] -> '%s'\n", decoded);
+            fflush(stdout);
+        }
+
         /* Filter [[ artifacts */
         if (decoded[0] == '[' && decoded[1] == '[') {
             free(logits); logits = model_forward(model, cache, next, pos); pos++;
