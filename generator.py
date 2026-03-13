@@ -151,7 +151,9 @@ class AyaEngineGenerator:
         """Generate an answer via the aya engine server."""
 
         if not language:
-            language = "the same language as the question"
+            # Simple language detection: check for non-ASCII chars typical of French
+            has_accent = any(c in query for c in "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ")
+            language = "French" if has_accent else "English"
         lang_hint = f" Respond in {language}."
         prompt = (
             f"You are a helpful multilingual research assistant.{lang_hint}\n\n"
