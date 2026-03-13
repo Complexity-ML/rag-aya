@@ -98,6 +98,9 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
     int high_entropy_count = 0;
     int got_first_word = 0;  /* leading garbage strip: skip until first alpha token */
     char prev_decoded_end = 0;  /* last char of previous token for cross-token patterns */
+    int prev_token_id = -1;
+    int same_token_count = 0;   /* consecutive same-token repetition */
+    int single_char_count = 0;  /* consecutive single-char tokens (degeneration sign) */
 
     /* Response buffer (non-stream) */
     char *response = NULL;
@@ -212,6 +215,37 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
         else
             consecutive_newlines = 0;
         if (consecutive_newlines >= 3 && t >= min_tokens) break;
+
+        /* Repetition detection — same token loop */
+        if (next == prev_token_id) {
+            same_token_count++;
+            if (same_token_count >= 3 && t >= min_tokens) {
+                printf("  Repetition stop: token %d repeated %d times at pos %d\n",
+                       next, same_token_count + 1, t);
+                break;
+            }
+        } else {
+            same_token_count = 0;
+        }
+        prev_token_id = next;
+
+        /* Single-char degeneration — "t o f o r" pattern */
+        {
+            int dlen2 = (int)strlen(decoded);
+            int pure_len = dlen2;
+            /* Strip leading/trailing spaces for length check */
+            const char *p = decoded;
+            while (*p == ' ') { p++; pure_len--; }
+            if (pure_len <= 1) {
+                single_char_count++;
+                if (single_char_count >= 5 && t >= min_tokens) {
+                    printf("  Single-char degeneration stop at token %d\n", t);
+                    break;
+                }
+            } else {
+                single_char_count = 0;
+            }
+        }
 
         if (stream) {
             send_sse_token(client, decoded);
