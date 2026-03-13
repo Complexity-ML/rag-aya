@@ -113,17 +113,6 @@ model_t *model_load(gguf_file *gguf) {
     m->logit_scale      = gguf->logit_scale;
 
     strncpy(m->architecture, gguf->architecture, sizeof(m->architecture) - 1);
-
-    /* Cohere2: compute logit_scale if not provided in GGUF.
-     * Cohere2 models scale logits by 1/sqrt(head_dim) but the GGUF
-     * typically does not store this — llama.cpp computes it too. */
-    int is_cohere = (strcmp(m->architecture, "cohere2") == 0 ||
-                     strcmp(m->architecture, "cohere") == 0);
-    if (is_cohere && m->logit_scale == 1.0f && m->head_dim > 0) {
-        m->logit_scale = 1.0f / sqrtf((float)m->head_dim);
-        printf("  Cohere2: computed logit_scale = %.6f (1/sqrt(%d))\n",
-               m->logit_scale, m->head_dim);
-    }
     m->file_data = gguf->data;
     m->file_size = gguf->file_size;
 
