@@ -183,16 +183,23 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
             prev_decoded_end = dlen > 0 ? decoded[dlen - 1] : 0;
         }
 
-        /* Leading garbage strip — skip tokens before first alphabetic content */
+        /* Leading garbage strip — skip tokens until first clean word.
+         * A "clean" token: majority alpha, starts with alpha or space+alpha,
+         * no brackets/special chars mixed in. */
         if (!got_first_word) {
-            int has_alpha = 0;
+            int dlen = (int)strlen(decoded);
+            int alpha_count = 0, junk_count = 0;
             for (int ci = 0; decoded[ci]; ci++) {
                 unsigned char ch = (unsigned char)decoded[ci];
-                if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
-                    has_alpha = 1; break;
-                }
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == ' ')
+                    alpha_count++;
+                else if (ch == '[' || ch == ']' || ch == '{' || ch == '}' ||
+                         ch == '|' || ch == '\\' || ch == '=' || ch < 32)
+                    junk_count++;
             }
-            if (!has_alpha) {
+            /* Skip if: no alpha, or has junk chars, or too short with no space */
+            if (alpha_count == 0 || junk_count > 0 ||
+                (dlen <= 2 && decoded[0] != ' ')) {
                 free(logits); logits = model_forward(model, cache, next, pos); pos++;
                 continue;
             }
