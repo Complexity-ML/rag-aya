@@ -150,7 +150,9 @@ class AyaEngineGenerator:
     ) -> GenerationResult:
         """Generate an answer via the aya engine server."""
 
-        lang_hint = f" Respond in {language}." if language else ""
+        if not language:
+            language = "the same language as the question"
+        lang_hint = f" Respond in {language}."
         prompt = (
             f"You are a helpful multilingual research assistant.{lang_hint}\n\n"
             f"Context:\n{context}\n\n"
