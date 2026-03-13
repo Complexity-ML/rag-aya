@@ -420,6 +420,7 @@ AYA_API char *aya_generate(aya_context *ctx,
                            int max_tokens,
                            float temperature,
                            int top_k,
+                           float rep_penalty,
                            aya_token_callback cb,
                            void *user_data) {
     if (!ctx || !prompt) return NULL;
@@ -476,7 +477,21 @@ AYA_API char *aya_generate(aya_context *ctx,
     char *response = (char *)calloc(resp_cap, 1);
     int resp_len = 0;
 
+    /* Repetition penalty tracking */
+    int *gen_ids = (int *)malloc(max_tokens * sizeof(int));
+    int gen_count = 0;
+    if (rep_penalty <= 0.0f) rep_penalty = 1.0f;
+
     for (int t = 0; t < max_tokens; t++) {
+        /* Apply repetition penalty */
+        if (rep_penalty != 1.0f) {
+            for (int g = 0; g < gen_count; g++) {
+                int id = gen_ids[g];
+                if (logits[id] > 0) logits[id] /= rep_penalty;
+                else                logits[id] *= rep_penalty;
+            }
+        }
+
         int next = (temperature <= 0.0f)
             ? argmax_fn(logits, model->vocab_size)
             : sample_topk(logits, model->vocab_size, top_k, temperature);
@@ -484,6 +499,8 @@ AYA_API char *aya_generate(aya_context *ctx,
         /* Stop on EOS, <EOS_TOKEN>(3), or END_OF_TURN(6) */
         if (next == tk->eos_id || next == COHERE_EOS_ID || next == COHERE_END_TURN_ID)
             break;
+
+        gen_ids[gen_count++] = next;
 
         /* Skip special tokens: IDs 0-9 or <|...|> tokens */
         const char *tok_text = tokenizer_decode_raw(tk, next);
@@ -519,6 +536,7 @@ AYA_API char *aya_generate(aya_context *ctx,
     }
 
     if (logits) free(logits);
+    free(gen_ids);
 
     return response;
 }

@@ -28,10 +28,14 @@
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
+  #include <sys/select.h>
+  #include <fcntl.h>
   #define CLOSE_SOCKET close
   typedef int SOCKET;
   #define INVALID_SOCKET -1
 #endif
+
+static volatile int generating = 0;  /* 1 while generation in progress */
 
 /* ---- Simple hash table for token->id lookup ---- */
 
@@ -599,7 +603,15 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (strcmp(path, "/generate") == 0 && strcmp(method, "POST") == 0 && generating) {
+            send_response(client, 503, "Service Busy", "application/json",
+                "{\"error\":\"generation in progress, try again later\"}");
+            CLOSE_SOCKET(client);
+            continue;
+        }
+
         if (strcmp(path, "/generate") == 0 && strcmp(method, "POST") == 0) {
+            generating = 1;
             const char *body = strstr(req_buf, "\r\n\r\n");
             if (!body) { CLOSE_SOCKET(client); continue; }
             body += 4;
@@ -751,9 +763,13 @@ int main(int argc, char **argv) {
             if (logits) free(logits);
             free(input_ids);
             free(gen_ids);
+            generating = 0;
             printf("  Generated %d tokens\n", pos - n_tokens);
             fflush(stdout);
 
+        } else if (strcmp(path, "/generate") == 0) {
+            send_response(client, 405, "Method Not Allowed", "application/json",
+                "{\"error\":\"POST required\"}");
         } else {
             send_response(client, 404, "Not Found", "application/json",
                 "{\"error\":\"not found\"}");

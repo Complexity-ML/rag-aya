@@ -19,50 +19,19 @@ load_dotenv()
 
 from config import Config
 from chunker import chunk_documents
-from retriever import Retriever
-from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
+from pipeline import build_pipeline, build_embedder, build_retriever
 from logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def build_pipeline(config: Config):
-    """Build embedder + retriever + generator."""
-    if config.local_embedder:
-        from embedder import LocalEmbedder
-        embedder = LocalEmbedder(config.local_embed_model)
-    else:
-        from embedder import CohereEmbedder
-        embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
-
-    retriever = Retriever(embedder)
-
-    if config.gguf_path:
-        from generator import AyaEngineGenerator
-        config.validate(require_cohere=not config.local_embedder)
-        generator = AyaEngineGenerator(config.gguf_path, port=config.engine_port)
-    else:
-        config.validate(require_cohere=True)
-        generator = AyaGenerator(config.cohere_api_key, config.gen_model)
-
-    return embedder, retriever, generator
 
 
 def cmd_index(config: Config, lang_pair: str, dataset: str = None):
     """Load WMT25 data, chunk, embed, save index."""
     from data_loader import load_wmt_dataset, load_wmt_recipe
 
-    # Only need embedder + retriever for indexing (no generator)
-    if config.local_embedder:
-        from embedder import LocalEmbedder
-        embedder = LocalEmbedder(config.local_embed_model)
-    else:
-        from embedder import CohereEmbedder
-        config.validate(require_cohere=True)
-        embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
-
-    retriever = Retriever(embedder)
+    embedder = build_embedder(config)
+    retriever = build_retriever(config, embedder)
 
     if dataset:
         logger.info("Loading WMT dataset: %s (%s)...", dataset, lang_pair)
@@ -119,13 +88,14 @@ def cmd_query(config: Config, query: str):
     logger.info("Generating answer...")
     if hasattr(generator, 'generate_stream'):
         print()
-        full_answer = ""
-        for token in generator.generate_stream(
-            query=query, context=context,
-            max_tokens=config.max_tokens, temperature=config.temperature,
-        ):
-            print(token, end="", flush=True)
-            full_answer += token
+        try:
+            for token in generator.generate_stream(
+                query=query, context=context,
+                max_tokens=config.max_tokens, temperature=config.temperature,
+            ):
+                print(token, end="", flush=True)
+        except KeyboardInterrupt:
+            pass
         print("\n")
     else:
         result = generator.generate(
@@ -204,8 +174,11 @@ def cmd_demo(config: Config):
         context = retriever.get_context(query, k=config.top_k)
         if hasattr(generator, 'generate_stream'):
             print()
-            for token in generator.generate_stream(query, context, max_tokens=config.max_tokens):
-                print(token, end="", flush=True)
+            try:
+                for token in generator.generate_stream(query, context, max_tokens=config.max_tokens):
+                    print(token, end="", flush=True)
+            except KeyboardInterrupt:
+                pass
             print("\n")
         else:
             result = generator.generate(query, context, max_tokens=config.max_tokens)

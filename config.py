@@ -23,6 +23,7 @@ class Config:
     # Retrieval
     top_k: int = 5
     index_path: str = "index/"
+    cache_size: int = 128
 
     # Generation
     max_tokens: int = 512

@@ -59,6 +59,7 @@ typedef void (*aya_token_callback)(const char *token, void *user_data);
  * @param max_tokens  Maximum tokens to generate.
  * @param temperature Sampling temperature (<=0 for greedy/argmax).
  * @param top_k       Top-K sampling (ignored if temperature <= 0).
+ * @param rep_penalty Repetition penalty (1.0 = disabled, >1.0 = penalize repeats).
  * @param cb          Optional streaming callback (NULL to disable).
  * @param user_data   Opaque pointer forwarded to cb.
  * @return            Allocated string — caller must free with aya_free_string.
@@ -69,6 +70,7 @@ AYA_API char *aya_generate(aya_context *ctx,
                            int max_tokens,
                            float temperature,
                            int top_k,
+                           float rep_penalty,
                            aya_token_callback cb,
                            void *user_data);
 
