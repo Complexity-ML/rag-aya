@@ -47,4 +47,16 @@ float *build_token_quality(tokenizer_t *tk);
 void apply_token_quality(float *logits, const float *quality,
                          int vocab_size, float alpha);
 
+/* ---- Entropy monitoring ----
+ *
+ * Compute Shannon entropy (bits) of the top-k logit distribution.
+ * H = -Σ p(i) * log2(p(i))
+ *
+ * Low entropy (~1-4): model is confident (coherent generation)
+ * High entropy (>8):  model is confused (degeneration likely)
+ *
+ * Returns entropy in bits. */
+float compute_entropy(const float *logits, int vocab_size, int top_k,
+                      float temperature);
+
 #endif /* SAMPLER_H */

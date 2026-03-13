@@ -73,7 +73,8 @@ static int *build_prompt(tokenizer_t *tk, const char *architecture,
 static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
                            int *input_ids, int n_tokens, sample_params_t sp,
                            int max_tokens, int min_tokens, float rep_penalty,
-                           float quality_alpha, int stream, SOCKET client) {
+                           float quality_alpha, float entropy_threshold,
+                           int stream, SOCKET client) {
     int pos = 0;
     float *logits = NULL;
 
@@ -94,6 +95,7 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
     int *gen_ids = malloc(max_tokens * sizeof(int));
     int gen_count = 0;
     int consecutive_newlines = 0;
+    int high_entropy_count = 0;
 
     /* Response buffer (non-stream) */
     char *response = NULL;
@@ -116,6 +118,22 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
 
         /* Token quality bias */
         apply_token_quality(logits, token_quality, model->vocab_size, quality_alpha);
+
+        /* Entropy monitoring — detect degeneration */
+        if (entropy_threshold > 0.0f && t >= min_tokens) {
+            float H = compute_entropy(logits, model->vocab_size,
+                                      sp.top_k > 0 ? sp.top_k : 64, sp.temperature);
+            if (H > entropy_threshold) {
+                high_entropy_count++;
+                if (high_entropy_count >= 3) {
+                    printf("  Entropy stop: H=%.2f (threshold=%.1f) at token %d\n",
+                           H, entropy_threshold, t);
+                    break;
+                }
+            } else {
+                high_entropy_count = 0;
+            }
+        }
 
         int next;
         if (sp.temperature <= 0)
@@ -373,11 +391,12 @@ int main(int argc, char **argv) {
             int stream = json_get_int(body, "stream", 0);
             float rep_penalty = json_get_float(body, "repetition_penalty", 1.15f);
             float quality_alpha = json_get_float(body, "quality_alpha", 1.0f);
+            float entropy_threshold = json_get_float(body, "entropy_threshold", 6.0f);
 
             sample_params_t sp = { top_k, top_p, min_p, temperature };
 
-            printf("Generate: (max=%d, temp=%.2f, topk=%d, topp=%.2f, minp=%.2f, rep=%.2f, qa=%.2f)\n",
-                   max_tokens, temperature, top_k, top_p, min_p, rep_penalty, quality_alpha);
+            printf("Generate: (max=%d, temp=%.2f, topk=%d, topp=%.2f, minp=%.2f, rep=%.2f, qa=%.2f, ent=%.1f)\n",
+                   max_tokens, temperature, top_k, top_p, min_p, rep_penalty, quality_alpha, entropy_threshold);
             fflush(stdout);
 
             /* Reset KV cache */
@@ -392,7 +411,8 @@ int main(int argc, char **argv) {
 
             int gen = generate_tokens(model, cache, tk, input_ids, n_tokens,
                                       sp, max_tokens, min_tokens, rep_penalty,
-                                      quality_alpha, stream, client);
+                                      quality_alpha, entropy_threshold,
+                                      stream, client);
 
             free(input_ids);
             generating = 0;

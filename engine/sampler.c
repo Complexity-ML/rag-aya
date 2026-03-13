@@ -245,3 +245,42 @@ void apply_token_quality(float *logits, const float *quality,
         logits[i] += alpha * quality[i];
     }
 }
+
+float compute_entropy(const float *logits, int vocab_size, int top_k,
+                      float temperature) {
+    if (top_k <= 0) top_k = 64;
+    if (top_k > vocab_size) top_k = vocab_size;
+    if (temperature <= 0) temperature = 1.0f;
+
+    /* Find top-k values */
+    float *vals = malloc(top_k * sizeof(float));
+    for (int i = 0; i < top_k; i++) vals[i] = -1e30f;
+
+    for (int v = 0; v < vocab_size; v++) {
+        float val = logits[v];
+        if (val > vals[top_k - 1]) {
+            vals[top_k - 1] = val;
+            for (int j = top_k - 1; j > 0 && vals[j] > vals[j - 1]; j--) {
+                float tv = vals[j]; vals[j] = vals[j - 1]; vals[j - 1] = tv;
+            }
+        }
+    }
+
+    /* Softmax with temperature */
+    float max_val = vals[0];
+    float sum = 0.0f;
+    for (int i = 0; i < top_k; i++) {
+        vals[i] = expf((vals[i] - max_val) / temperature);
+        sum += vals[i];
+    }
+
+    /* Shannon entropy in bits */
+    float H = 0.0f;
+    for (int i = 0; i < top_k; i++) {
+        float p = vals[i] / sum;
+        if (p > 1e-10f) H -= p * log2f(p);
+    }
+
+    free(vals);
+    return H;
+}

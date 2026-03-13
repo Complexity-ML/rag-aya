@@ -214,6 +214,22 @@ void decode_token_str(const char *tok_str, char *out, int out_sz) {
             continue;
         }
 
+        /* Sentencepiece: ▁ (U+2581) → space */
+        if (cp == 0x2581) {
+            out[di++] = ' ';
+            i += nbytes;
+            continue;
+        }
+
+        /* Sentencepiece: <0x0A> newline marker sometimes encoded as U+010A etc.
+         * Pass through standard UTF-8 for non-GPT-2 codepoints above 0x2580 */
+        if (cp > 0x2580) {
+            for (int b = 0; b < nbytes && di < out_sz - 1; b++)
+                out[di++] = tok_str[i + b];
+            i += nbytes;
+            continue;
+        }
+
         if ((cp >= 33 && cp <= 126) || (cp >= 161 && cp <= 172) || (cp >= 174 && cp <= 255)) {
             out[di++] = (char)cp;
         } else if (cp >= 256) {
