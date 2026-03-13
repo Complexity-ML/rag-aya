@@ -8,6 +8,9 @@ TARGET  = aya-server
 ifeq ($(OS),Windows_NT)
     LDFLAGS += -lws2_32
     TARGET  := aya-server.exe
+    # Enable AVX2+FMA and OpenMP on x86_64
+    CFLAGS  += -mavx2 -mfma -fopenmp
+    LDFLAGS += -fopenmp
 endif
 
 # macOS / Apple Silicon - use Accelerate framework + NEON
@@ -17,7 +20,16 @@ ifeq ($(UNAME_S),Darwin)
     UNAME_M := $(shell uname -m)
     ifeq ($(UNAME_M),arm64)
         CFLAGS += -mcpu=apple-m1
+    else
+        CFLAGS  += -mavx2 -mfma -fopenmp
+        LDFLAGS += -fopenmp
     endif
+endif
+
+# Linux x86_64
+ifeq ($(UNAME_S),Linux)
+    CFLAGS  += -mavx2 -mfma -fopenmp
+    LDFLAGS += -fopenmp
 endif
 
 all: $(TARGET)

@@ -660,11 +660,17 @@ int main(int argc, char **argv) {
 
             int pos = 0;
             float *logits = NULL;
+            printf("  Prefill %d tokens...\n", n_tokens); fflush(stdout);
             for (int i = 0; i < n_tokens; i++) {
                 if (logits) free(logits);
                 logits = model_forward(model, cache, input_ids[i], pos);
                 pos++;
+                if ((i + 1) % 50 == 0 || i == n_tokens - 1) {
+                    printf("  Prefill %d/%d\n", i + 1, n_tokens);
+                    fflush(stdout);
+                }
             }
+            printf("  Prefill done, generating...\n"); fflush(stdout);
 
             /* Repetition penalty: track generated token IDs */
             int *gen_ids = malloc(max_tokens * sizeof(int));
