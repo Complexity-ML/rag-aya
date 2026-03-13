@@ -24,6 +24,7 @@
 #endif
 
 static volatile int generating = 0;
+static float *token_quality = NULL;  /* pre-computed token quality bias */
 
 /* ---- Generation core ---- */
 
@@ -72,7 +73,7 @@ static int *build_prompt(tokenizer_t *tk, const char *architecture,
 static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
                            int *input_ids, int n_tokens, sample_params_t sp,
                            int max_tokens, int min_tokens, float rep_penalty,
-                           int stream, SOCKET client) {
+                           float quality_alpha, int stream, SOCKET client) {
     int pos = 0;
     float *logits = NULL;
 
@@ -112,6 +113,9 @@ static int generate_tokens(model_t *model, kv_cache_t *cache, tokenizer_t *tk,
                 else                 logits[id] *= rep_penalty;
             }
         }
+
+        /* Token quality bias */
+        apply_token_quality(logits, token_quality, model->vocab_size, quality_alpha);
 
         int next;
         if (sp.temperature <= 0)
@@ -233,6 +237,9 @@ int main(int argc, char **argv) {
     printf("Tokenizer: %d tokens, %d merges, BOS=%d, EOS=%d\n",
            tk->vocab_size, tk->n_merges, tk->bos_id, tk->eos_id);
     printf("Architecture: %s\n", model->architecture);
+
+    /* Build token quality vector */
+    token_quality = build_token_quality(tk);
     fflush(stdout);
 
     /* Quick tokenizer test */
@@ -346,11 +353,12 @@ int main(int argc, char **argv) {
             int min_tokens = json_get_int(body, "min_tokens", 8);
             int stream = json_get_int(body, "stream", 0);
             float rep_penalty = json_get_float(body, "repetition_penalty", 1.15f);
+            float quality_alpha = json_get_float(body, "quality_alpha", 1.0f);
 
             sample_params_t sp = { top_k, top_p, min_p, temperature };
 
-            printf("Generate: (max=%d, temp=%.2f, topk=%d, topp=%.2f, minp=%.2f, rep=%.2f)\n",
-                   max_tokens, temperature, top_k, top_p, min_p, rep_penalty);
+            printf("Generate: (max=%d, temp=%.2f, topk=%d, topp=%.2f, minp=%.2f, rep=%.2f, qa=%.2f)\n",
+                   max_tokens, temperature, top_k, top_p, min_p, rep_penalty, quality_alpha);
             fflush(stdout);
 
             /* Reset KV cache */
@@ -365,7 +373,7 @@ int main(int argc, char **argv) {
 
             int gen = generate_tokens(model, cache, tk, input_ids, n_tokens,
                                       sp, max_tokens, min_tokens, rep_penalty,
-                                      stream, client);
+                                      quality_alpha, stream, client);
 
             free(input_ids);
             generating = 0;

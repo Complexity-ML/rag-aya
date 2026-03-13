@@ -166,7 +166,7 @@ class AyaEngineGenerator:
             "top_p": 0.9,
             "min_p": 0.05,
             "min_tokens": 8,
-            "repetition_penalty": 1.15,
+            "repetition_penalty": 1.15, "quality_alpha": 1.0,
         }, ensure_ascii=False).encode("utf-8")
 
         req = urllib.request.Request(
@@ -214,7 +214,7 @@ class AyaEngineGenerator:
             "top_p": 0.9,
             "min_p": 0.05,
             "min_tokens": 8,
-            "repetition_penalty": 1.15,
+            "repetition_penalty": 1.15, "quality_alpha": 1.0,
             "stream": 1,
         }, ensure_ascii=False).encode("utf-8")
 
