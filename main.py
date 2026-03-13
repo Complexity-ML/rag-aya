@@ -193,7 +193,7 @@ def main():
     parser = argparse.ArgumentParser(description="RAG-Aya Pipeline")
     parser.add_argument("command", choices=["index", "query", "eval", "demo"])
     parser.add_argument("query_text", nargs="?", default="")
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--max-docs", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--index-path", default="index/")

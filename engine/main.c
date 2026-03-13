@@ -450,6 +450,13 @@ int main(int argc, char **argv) {
             int n_tokens;
             int *input_ids = build_prompt(tk, model->architecture, prompt, &n_tokens);
 
+            /* Warn if prompt is too large for context window */
+            int ctx_limit = gguf->context_length > 0 ? gguf->context_length : 8192;
+            if (n_tokens + max_tokens > ctx_limit) {
+                printf("  WARNING: prompt (%d) + max_tokens (%d) = %d > context_length (%d)\n",
+                       n_tokens, max_tokens, n_tokens + max_tokens, ctx_limit);
+            }
+
             int gen = generate_tokens(model, cache, tk, input_ids, n_tokens,
                                       sp, max_tokens, min_tokens, rep_penalty,
                                       quality_alpha, entropy_threshold,

@@ -262,7 +262,7 @@ def main():
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
     parser.add_argument("--chunk-size", type=int, default=512)
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--local", action="store_true", help="Use local embedder")
     parser.add_argument("--gguf", default="", help="Path to GGUF model file")
     parser.add_argument("--engine-port", type=int, default=8089)
