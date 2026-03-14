@@ -30,3 +30,15 @@ wmt_data/
 *.swp
 docs*
 .claude/
+
+# Generated benchmark outputs
+figures/
+benchmark_results.json
+report.tex
+report.pdf
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
