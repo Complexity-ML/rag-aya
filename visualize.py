@@ -182,7 +182,7 @@ def figure_metrics(results: dict, out_dir: str):
     # Language markers on x-axis
     xtick_labels = []
     for i, (d, lang) in enumerate(zip(descs, langs)):
-        flag = "🇬🇧" if lang == "eng" else "🇫🇷"
+        flag = "[EN]" if lang == "eng" else "[FR]"
         xtick_labels.append(f"{flag} {d}")
 
     ax.set_xticks(x)
@@ -324,6 +324,113 @@ def figure_scatter(results: dict, out_dir: str):
     print(f"[visualize] saved {path}")
 
 
+# ── Figure 5: emoji profile ────────────────────────────────────────────────
+
+def count_emojis(text: str):
+    """Return list of individual emoji characters found in text."""
+    # Unicode ranges covering most emoji blocks
+    emoji_ranges = [
+        (0x1F600, 0x1F64F),  # Emoticons
+        (0x1F300, 0x1F5FF),  # Misc symbols & pictographs
+        (0x1F680, 0x1F6FF),  # Transport & map
+        (0x1F700, 0x1F77F),  # Alchemical
+        (0x1F900, 0x1F9FF),  # Supplemental symbols
+        (0x1FA00, 0x1FA6F),  # Chess symbols etc.
+        (0x1FA70, 0x1FAFF),  # Symbols extended-A
+        (0x2600,  0x26FF),   # Misc symbols
+        (0x2700,  0x27BF),   # Dingbats
+        (0x231A,  0x231B),   # Watch / hourglass
+        (0x23E9,  0x23F3),   # Other clock symbols
+    ]
+    found = []
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in emoji_ranges):
+            found.append(ch)
+    return found
+
+
+def figure_emoji(results: dict, out_dir: str):
+    """Bar chart: emoji count per query + emoji inventory per response."""
+    rows = results["results"]
+    descs  = [r["description"] for r in rows]
+    langs  = [r["lang"] for r in rows]
+
+    all_emojis = [count_emojis(r["response"]) for r in rows]
+    counts     = [len(e) for e in all_emojis]
+
+    # Unique emoji inventory across all responses
+    from collections import Counter
+    total_counter = Counter()
+    for emojis in all_emojis:
+        total_counter.update(emojis)
+
+    fig = plt.figure(figsize=(14, 6))
+    gs  = GridSpec(1, 2, figure=fig, width_ratios=[2, 1], wspace=0.35)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1])
+
+    # Left: bar chart per query
+    colors = [C_ENG if l == "eng" else C_FRA for l in langs]
+    x = np.arange(len(rows))
+    bars = ax1.bar(x, counts, color=colors, alpha=0.82, zorder=2)
+
+    for bar, emojis in zip(bars, all_emojis):
+        if emojis:
+            sample = "".join(dict.fromkeys(emojis))[:6]  # up to 6 unique
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.15,
+                sample,
+                ha="center", va="bottom", fontsize=11,
+            )
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(
+        [f"{'[EN]' if l == 'eng' else '[FR]'} {d}" for d, l in zip(descs, langs)],
+        rotation=30, ha="right", fontsize=8,
+    )
+    ax1.set_ylabel("Emoji count in response", fontsize=9)
+    ax1.set_title("Emoji Generation per Query", fontsize=11)
+    ax1.grid(axis="y", alpha=0.4, zorder=0)
+    ax1.set_facecolor("#F9F9F9")
+
+    legend_elements = [
+        mpatches.Patch(color=C_ENG, alpha=0.82, label="English query"),
+        mpatches.Patch(color=C_FRA, alpha=0.82, label="French query"),
+    ]
+    ax1.legend(handles=legend_elements, fontsize=9)
+
+    # Right: top-N emoji inventory
+    top = total_counter.most_common(20)
+    if top:
+        emojis_list, freq_list = zip(*top)
+        y = np.arange(len(top))
+        ax2.barh(y, freq_list, color="#7E57C2", alpha=0.82, zorder=2)
+        ax2.set_yticks(y)
+        ax2.set_yticklabels(emojis_list, fontsize=14)
+        ax2.set_xlabel("Occurrences", fontsize=9)
+        ax2.set_title(f"Emoji Inventory\n({sum(counts)} total, {len(total_counter)} unique)", fontsize=11)
+        ax2.grid(axis="x", alpha=0.4, zorder=0)
+        ax2.set_facecolor("#F9F9F9")
+        ax2.invert_yaxis()
+    else:
+        ax2.text(0.5, 0.5, "No emojis found", ha="center", va="center",
+                 transform=ax2.transAxes, fontsize=12, color="#888")
+        ax2.set_title("Emoji Inventory", fontsize=11)
+
+    fig.suptitle(
+        "Aya Tiny (Q4_K) — Emoji Expressiveness Profile",
+        fontsize=12, fontweight="bold",
+    )
+
+    path = os.path.join(out_dir, "fig5_emoji_profile.png")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[visualize] saved {path}")
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def main():
@@ -346,6 +453,7 @@ def main():
     figure_metrics(results, args.out)
     figure_categories(results, args.out)
     figure_scatter(results, args.out)
+    figure_emoji(results, args.out)
 
     print(f"[visualize] All figures saved to {args.out}")
 
