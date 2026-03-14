@@ -31,6 +31,8 @@ wmt_data/
 docs*
 .claude/
 
+# Test 
+test_results.txt
 # Generated benchmark outputs
 figures/
 benchmark_results.json

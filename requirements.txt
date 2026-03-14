@@ -3,5 +3,6 @@ cohere>=5.0
 numpy
 python-dotenv
 ragas
+pytest
 mtdata==0.4.3
 sentence-transformers
