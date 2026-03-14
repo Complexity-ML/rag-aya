@@ -361,9 +361,21 @@ def figure_emoji(results: dict, out_dir: str):
 
     # Unique emoji inventory across all responses
     from collections import Counter
+    from matplotlib import font_manager
     total_counter = Counter()
     for emojis in all_emojis:
         total_counter.update(emojis)
+
+    # Find an emoji-capable font (Segoe UI Emoji on Windows, fallbacks for other OS)
+    emoji_font = None
+    for fname in ["Segoe UI Emoji", "Apple Color Emoji", "Noto Emoji", "Symbola"]:
+        try:
+            prop = font_manager.FontProperties(family=fname)
+            if font_manager.findfont(prop, fallback_to_default=False):
+                emoji_font = prop
+                break
+        except Exception:
+            pass
 
     fig = plt.figure(figsize=(14, 6))
     gs  = GridSpec(1, 2, figure=fig, width_ratios=[2, 1], wspace=0.35)
@@ -383,6 +395,7 @@ def figure_emoji(results: dict, out_dir: str):
                 bar.get_height() + 0.15,
                 sample,
                 ha="center", va="bottom", fontsize=11,
+                fontproperties=emoji_font if emoji_font else None,
             )
 
     ax1.set_xticks(x)
@@ -408,7 +421,8 @@ def figure_emoji(results: dict, out_dir: str):
         y = np.arange(len(top))
         ax2.barh(y, freq_list, color="#7E57C2", alpha=0.82, zorder=2)
         ax2.set_yticks(y)
-        ax2.set_yticklabels(emojis_list, fontsize=14)
+        ax2.set_yticklabels(emojis_list, fontsize=14,
+                            fontproperties=emoji_font if emoji_font else None)
         ax2.set_xlabel("Occurrences", fontsize=9)
         ax2.set_title(f"Emoji Inventory\n({sum(counts)} total, {len(total_counter)} unique)", fontsize=11)
         ax2.grid(axis="x", alpha=0.4, zorder=0)
