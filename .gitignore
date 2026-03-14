@@ -20,3 +20,6 @@ index/
 *.swp
 docs*
 .claude/
+
+# Test 
+test_results.txt
