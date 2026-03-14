@@ -28,6 +28,8 @@ class Config:
     # Generation
     max_tokens: int = 512
     temperature: float = 0.3
+    quality_alpha: float = 1.0
+    entropy_threshold: float = 3.5
 
     # Local model (aya-offline engine)
     gguf_path: str = ""

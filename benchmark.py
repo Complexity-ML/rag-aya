@@ -268,6 +268,8 @@ def run_benchmark(config: Config, test_cases: List[TestCase]) -> List[BenchResul
                 context=context,
                 max_tokens=config.max_tokens,
                 temperature=config.temperature,
+                quality_alpha=config.quality_alpha,
+                entropy_threshold=config.entropy_threshold,
             )
             response = result.answer.strip()
         except Exception as e:
@@ -435,6 +437,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--output", default="benchmark_results.json")
+    parser.add_argument("--quality-alpha", type=float, default=1.0)
+    parser.add_argument("--entropy-threshold", type=float, default=3.5)
     parser.add_argument("--local-embed-model", default="paraphrase-multilingual-MiniLM-L12-v2")
     args = parser.parse_args()
 
@@ -449,6 +453,8 @@ def main():
         top_k=args.top_k,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
+        quality_alpha=args.quality_alpha,
+        entropy_threshold=args.entropy_threshold,
         index_path=args.index_path,
         gguf_path=args.gguf,
         engine_port=args.engine_port,

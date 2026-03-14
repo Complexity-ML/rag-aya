@@ -147,6 +147,8 @@ class AyaEngineGenerator:
         max_tokens: int = 512,
         temperature: float = 0.3,
         language: Optional[str] = None,
+        quality_alpha: float = 1.0,
+        entropy_threshold: float = 3.5,
     ) -> GenerationResult:
         """Generate an answer via the aya engine server."""
 
@@ -170,7 +172,9 @@ class AyaEngineGenerator:
             "top_p": 0.9,
             "min_p": 0.05,
             "min_tokens": 8,
-            "repetition_penalty": 1.15, "quality_alpha": 1.0,
+            "repetition_penalty": 1.15,
+            "quality_alpha": quality_alpha,
+            "entropy_threshold": entropy_threshold,
         }, ensure_ascii=False).encode("utf-8")
 
         req = urllib.request.Request(
