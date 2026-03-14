@@ -1,13 +1,13 @@
 """
 RAG-Aya :: Main Pipeline
 
-Full RAG pipeline: load data, chunk, embed, index, query, evaluate.
+Full RAG pipeline: load WMT data, chunk, embed, index, query, evaluate.
 
 Usage:
-    python main.py index                     # Load data + build index
-    python main.py query "your question"     # Query the index
-    python main.py eval                      # Run RAGAS evaluation
-    python main.py demo                      # Interactive demo
+    python main.py index --local --lang-pair eng-fra --wmt-dataset news_commentary
+    python main.py query "your question" --local --gguf ../tiny-aya-global-q4_k_m.gguf
+    python main.py eval  --local --gguf ../tiny-aya-global-q4_k_m.gguf
+    python main.py demo  --local --gguf ../tiny-aya-global-q4_k_m.gguf
 """
 
 import argparse
@@ -19,34 +19,40 @@ load_dotenv()
 
 from config import Config
 from chunker import chunk_documents
-from embedder import CohereEmbedder
-from retriever import Retriever
-from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
+from pipeline import build_pipeline, build_embedder, build_retriever
 from logger import init_logger
 
 logger = init_logger(__name__)
 
 
-def build_pipeline(config: Config):
-    """Build embedder + retriever + generator."""
-    config.validate()
-    embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
-    retriever = Retriever(embedder)
-    generator = AyaGenerator(config.cohere_api_key, config.gen_model)
-    return embedder, retriever, generator
+def cmd_index(config: Config, lang_pair: str, dataset: str = None):
+    """Load WMT25 data, chunk, embed, save index."""
+    from data_loader import load_wmt_dataset, load_wmt_recipe
 
+    embedder = build_embedder(config)
+    retriever = build_retriever(config, embedder)
 
-def cmd_index(config: Config):
-    """Load data, chunk, embed, save index."""
-    from data_loader import load_wikipedia
+    if dataset:
+        logger.info("Loading WMT dataset: %s (%s)...", dataset, lang_pair)
+        documents = load_wmt_dataset(
+            dataset, lang_pair,
+            cache_dir=config.wmt_cache_dir,
+            max_lines=config.wmt_max_lines,
+        )
+    else:
+        logger.info("Loading WMT recipe: %s...", lang_pair)
+        documents = load_wmt_recipe(
+            lang_pair,
+            cache_dir=config.wmt_cache_dir,
+            max_lines=config.wmt_max_lines,
+        )
 
-    embedder, retriever, _ = build_pipeline(config)
+    if not documents:
+        logger.error("No documents loaded.")
+        return
 
-    logger.info("Loading documents...")
-    documents = load_wikipedia(config.languages, max_per_lang=config.max_documents)
-
-    logger.info("Chunking...")
+    logger.info("Chunking %d documents...", len(documents))
     chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
     logger.info("%d chunks created", len(chunks))
 
@@ -55,7 +61,7 @@ def cmd_index(config: Config):
 
     logger.info("Saving index...")
     retriever.save(config.index_path)
-    logger.info("Done!")
+    logger.info("Done! Indexed %d chunks from WMT25 %s", len(chunks), lang_pair)
 
 
 def cmd_query(config: Config, query: str):
@@ -70,24 +76,39 @@ def cmd_query(config: Config, query: str):
 
     logger.info("Query: %s", query)
 
-    context = retriever.get_context(query, k=config.top_k)
+    # Detect query language for chunk filtering
+    has_accent = any(c in query for c in "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ")
+    query_lang = "fra" if has_accent else "eng"
+
+    context = retriever.get_context(query, k=config.top_k, prefer_lang=query_lang)
     if not context:
         logger.warning("No relevant documents found.")
         return
 
-    logger.info("Retrieved %d chunks:", config.top_k)
-    for chunk, score in retriever.search(query, k=config.top_k):
-        logger.info("  [%s] %.3f -- %s...", chunk.language, score, chunk.text[:80])
+    # Log the actual chunks that will be sent (parse from context)
+    context_parts = [p.strip() for p in context.split("\n\n") if p.strip()]
+    logger.info("Context: %d chunks (lang=%s):", len(context_parts), query_lang)
+    for part in context_parts:
+        logger.info("  %s...", part[:90])
 
     logger.info("Generating answer...")
-    result = generator.generate(
-        query=query,
-        context=context,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-    )
-    logger.info("Answer (%s):", result.model)
-    print(result.answer)
+    if hasattr(generator, 'generate_stream'):
+        print()
+        try:
+            for token in generator.generate_stream(
+                query=query, context=context,
+                max_tokens=config.max_tokens, temperature=config.temperature,
+            ):
+                print(token, end="", flush=True)
+        except KeyboardInterrupt:
+            pass
+        print("\n")
+    else:
+        result = generator.generate(
+            query=query, context=context,
+            max_tokens=config.max_tokens, temperature=config.temperature,
+        )
+        print(result.answer)
 
 
 def cmd_eval(config: Config):
@@ -157,20 +178,51 @@ def cmd_demo(config: Config):
             break
 
         context = retriever.get_context(query, k=config.top_k)
-        result = generator.generate(query, context, max_tokens=config.max_tokens)
-        print(f"\n{result.answer}\n")
+        if hasattr(generator, 'generate_stream'):
+            print()
+            try:
+                for token in generator.generate_stream(query, context, max_tokens=config.max_tokens):
+                    print(token, end="", flush=True)
+            except KeyboardInterrupt:
+                pass
+            print("\n")
+        else:
+            result = generator.generate(query, context, max_tokens=config.max_tokens)
+            print(f"\n{result.answer}\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="RAG-Aya Pipeline")
     parser.add_argument("command", choices=["index", "query", "eval", "demo"])
     parser.add_argument("query_text", nargs="?", default="")
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--max-docs", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
+    # Local mode
+    parser.add_argument("--local", action="store_true", help="Use local embedder + GGUF (no API needed)")
+    parser.add_argument("--local-embed-model", default="paraphrase-multilingual-MiniLM-L12-v2")
+    # GGUF options (uses aya-offline engine)
+    parser.add_argument("--gguf", default="", help="Path to GGUF model file")
+    parser.add_argument("--engine-port", type=int, default=8089, help="Aya engine server port")
+    # Generation options
+    parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens to generate (default: 512)")
+    parser.add_argument("--temperature", type=float, default=0.3, help="Sampling temperature (default: 0.3)")
+    # WMT options
+    parser.add_argument("--lang-pair", default="eng-ara", help="WMT lang pair (e.g. eng-ara, eng-bho)")
+    parser.add_argument("--wmt-dataset", default=None, help="Small dataset: news_commentary, ted_talks, wikimatrix")
+    parser.add_argument("--wmt-max-lines", type=int, default=500)
     args = parser.parse_args()
+
+    # Auto-detect GGUF: if not specified, look for one in current directory
+    if not args.gguf:
+        import glob as _glob
+        gguf_files = _glob.glob("*.gguf")
+        if gguf_files:
+            args.gguf = gguf_files[0]
+            args.local = True
+            logger.info("Auto-detected GGUF: %s (local mode)", args.gguf)
 
     config = Config(
         top_k=args.top_k,
@@ -178,11 +230,18 @@ def main():
         chunk_size=args.chunk_size,
         index_path=args.index_path,
         gen_model=args.model,
+        gguf_path=args.gguf,
+        engine_port=args.engine_port,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        wmt_max_lines=args.wmt_max_lines,
+        local_embedder=args.local,
+        local_embed_model=args.local_embed_model,
     )
 
     try:
         if args.command == "index":
-            cmd_index(config)
+            cmd_index(config, args.lang_pair, args.wmt_dataset)
         elif args.command == "query":
             if not args.query_text:
                 logger.error("Usage: python main.py query \"your question\"")
@@ -192,6 +251,9 @@ def main():
             cmd_eval(config)
         elif args.command == "demo":
             cmd_demo(config)
+    except KeyboardInterrupt:
+        print("\n")
+        sys.exit(0)
     except ValueError as e:
         logger.error("%s", e)
         sys.exit(1)

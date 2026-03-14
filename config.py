@@ -23,17 +23,32 @@ class Config:
     # Retrieval
     top_k: int = 5
     index_path: str = "index/"
+    cache_size: int = 128
 
     # Generation
     max_tokens: int = 512
     temperature: float = 0.3
+    quality_alpha: float = 1.0
+    entropy_threshold: float = 3.5
+
+    # Local model (aya-offline engine)
+    gguf_path: str = ""
+    engine_port: int = 8089
+
+    # Local embedder
+    local_embedder: bool = False
+    local_embed_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
 
     # Data
     languages: List[str] = field(default_factory=lambda: ["en", "fr"])
     max_documents: int = 100
 
-    def validate(self):
-        if not self.cohere_api_key:
+    # WMT
+    wmt_cache_dir: str = "wmt_data"
+    wmt_max_lines: int = 500
+
+    def validate(self, require_cohere: bool = True):
+        if require_cohere and not self.cohere_api_key:
             raise ValueError(
                 "COHERE_API_KEY not set.\n\n"
                 "  1. Get your key at: https://dashboard.cohere.com/api-keys\n"

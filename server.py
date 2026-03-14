@@ -26,10 +26,8 @@ load_dotenv()
 
 from config import Config
 from chunker import chunk_documents
-from embedder import CohereEmbedder
-from retriever import Retriever
-from generator import AyaGenerator
 from evaluate import EvalSample, evaluate_simple
+from pipeline import build_embedder, build_generator, build_retriever
 from logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,11 +35,10 @@ logger = init_logger(__name__)
 
 class RagAyaServer:
     def __init__(self, config: Config):
-        config.validate()
         self.config = config
-        self.embedder = CohereEmbedder(config.cohere_api_key, config.embed_model)
-        self.retriever = Retriever(self.embedder)
-        self.generator = AyaGenerator(config.cohere_api_key, config.gen_model)
+        self.embedder = build_embedder(config)
+        self.retriever = build_retriever(config, self.embedder)
+        self.generator = build_generator(config)
         self._pool = ThreadPoolExecutor(max_workers=4)
 
         # Load existing index if available
@@ -147,8 +144,12 @@ class RagAyaServer:
         if not query:
             return web.json_response({"error": "query is required"}, status=400)
 
-        # Retrieve context
-        context = await self._run_in_pool(self.retriever.get_context, query, k)
+        # Detect query language for chunk filtering
+        has_accent = any(c in query for c in "àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ")
+        query_lang = language or ("fra" if has_accent else "eng")
+
+        # Retrieve context (prefer same-language chunks)
+        context = await self._run_in_pool(self.retriever.get_context, query, k, query_lang)
 
         # Generate with Aya
         result = await self._run_in_pool(
@@ -261,14 +262,29 @@ def main():
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
     parser.add_argument("--chunk-size", type=int, default=512)
-    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument("--local", action="store_true", help="Use local embedder")
+    parser.add_argument("--gguf", default="", help="Path to GGUF model file")
+    parser.add_argument("--engine-port", type=int, default=8089)
     args = parser.parse_args()
+
+    # Auto-detect GGUF: if not specified, look for one in current directory
+    if not args.gguf:
+        import glob as _glob
+        gguf_files = _glob.glob("*.gguf")
+        if gguf_files:
+            args.gguf = gguf_files[0]
+            args.local = True
+            logger.info("Auto-detected GGUF: %s (local mode)", args.gguf)
 
     config = Config(
         index_path=args.index_path,
         gen_model=args.model,
         chunk_size=args.chunk_size,
         top_k=args.top_k,
+        local_embedder=args.local,
+        gguf_path=args.gguf,
+        engine_port=args.engine_port,
     )
 
     server = RagAyaServer(config)

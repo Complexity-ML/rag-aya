@@ -7,21 +7,23 @@ Stores chunks + embeddings, persists to disk.
 
 import json
 import os
+from collections import OrderedDict
 import numpy as np
 from typing import List, Tuple, Optional
 
 from chunker import Chunk
-from embedder import CohereEmbedder
 from logger import init_logger
 
 logger = init_logger(__name__)
 
 
 class Retriever:
-    def __init__(self, embedder: CohereEmbedder):
+    def __init__(self, embedder, cache_size: int = 128):
         self.embedder = embedder
         self.chunks: List[Chunk] = []
         self.embeddings: Optional[np.ndarray] = None
+        self._cache: OrderedDict = OrderedDict()
+        self._cache_size = cache_size
 
     def index(self, chunks: List[Chunk]):
         """Embed and index a list of chunks."""
@@ -34,6 +36,7 @@ class Retriever:
         else:
             self.chunks.extend(chunks)
             self.embeddings = np.vstack([self.embeddings, new_embeddings])
+        self._cache.clear()
         logger.info("Indexed %d chunks (total: %d)", len(chunks), len(self.chunks))
 
     def search(self, query: str, k: int = 5) -> List[Tuple[Chunk, float]]:
@@ -41,6 +44,13 @@ class Retriever:
         if self.embeddings is None or len(self.chunks) == 0:
             return []
 
+        cache_key = (query, k)
+        if cache_key in self._cache:
+            logger.debug("Cache hit: %s", query[:60])
+            self._cache.move_to_end(cache_key)
+            return self._cache[cache_key]
+
+        logger.debug("Cache miss: %s", query[:60])
         query_emb = self.embedder.embed_query(query)  # (1, dim)
 
         # Cosine similarity
@@ -50,13 +60,34 @@ class Retriever:
         similarities = similarities.squeeze()
 
         top_k_idx = np.argsort(similarities)[::-1][:k]
-        return [(self.chunks[i], float(similarities[i])) for i in top_k_idx]
+        results = [(self.chunks[i], float(similarities[i])) for i in top_k_idx]
 
-    def get_context(self, query: str, k: int = 5) -> str:
-        """Search and format results as context string."""
-        results = self.search(query, k=k)
+        # LRU eviction
+        self._cache[cache_key] = results
+        if len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
+
+        return results
+
+    def get_context(self, query: str, k: int = 5, prefer_lang: str = None) -> str:
+        """Search and format results as context string.
+        If prefer_lang is set, prioritize chunks in that language to avoid
+        confusing small models with mixed-language context."""
+        results = self.search(query, k=k * 2 if prefer_lang else k)
         if not results:
             return ""
+        if prefer_lang:
+            # Map short codes
+            lang_map = {"en": "eng", "fr": "fra", "eng": "eng", "fra": "fra"}
+            lang = lang_map.get(prefer_lang, prefer_lang)
+            same_lang = [(c, s) for c, s in results if c.language == lang]
+            # Only use same-language chunks to avoid confusing small models
+            if same_lang:
+                results = same_lang[:k]
+            else:
+                results = results[:k]  # fallback if no same-lang chunks
+        else:
+            results = results[:k]
         parts = []
         for chunk, score in results:
             parts.append(f"[{chunk.language}|{chunk.doc_id}] {chunk.text}")
