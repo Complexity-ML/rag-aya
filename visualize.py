@@ -377,7 +377,7 @@ def figure_emoji(results: dict, out_dir: str):
         except Exception:
             pass
 
-    fig = plt.figure(figsize=(14, 6))
+    fig = plt.figure(figsize=(14, 6), layout="constrained")
     gs  = GridSpec(1, 2, figure=fig, width_ratios=[2, 1], wspace=0.35)
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1])
@@ -439,7 +439,6 @@ def figure_emoji(results: dict, out_dir: str):
     )
 
     path = os.path.join(out_dir, "fig5_emoji_profile.png")
-    fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[visualize] saved {path}")
