@@ -1,0 +1,72 @@
+name: Evaluation Regression Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Base Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Set up Python for Base
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: Install Dependencies (Base)
+        run: |
+          cd base
+          pip install -r requirements.txt || true
+          pip install ragas setuptools mtdata hf_transfer sentence_transformers faiss-cpu
+
+      - name: Create Dummy Index & Run Evaluation (Base)
+        run: |
+          cd base
+          # Run index first so there is a 'chunks.json' generated for evaluation to load
+          # Using a small dataset for fast CI runs
+          python main.py index --local --lang-pair eng-fra --wmt-max-lines 50 || true
+          # Run eval and save to base_eval.json
+          python main.py eval --local --eval-output ../base_eval.json || true
+        continue-on-error: true
+
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Install Dependencies (PR)
+        run: |
+          cd pr
+          pip install -r requirements.txt || true
+          pip install ragas setuptools mtdata hf_transfer sentence_transformers faiss-cpu
+
+      - name: Create Dummy Index & Run Evaluation (PR)
+        run: |
+          cd pr
+          python main.py index --local --lang-pair eng-fra --wmt-max-lines 50 || true
+          python main.py eval --local --eval-output ../pr_eval.json || true
+        continue-on-error: true
+
+      - name: Compare Evaluations
+        id: compare
+        run: |
+          cd pr
+          python scripts/compare_evals.py ../base_eval.json ../pr_eval.json --output ../eval_comparison.md
+
+      - name: Add PR Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: always()
+        with:
+          header: RAG Evaluation Results
+          path: eval_comparison.md
+
+      - name: Fail if Regression
+        if: steps.compare.outcome == 'failure'
+        run: exit 1
