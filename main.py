@@ -111,7 +111,7 @@ def cmd_query(config: Config, query: str):
         print(result.answer)
 
 
-def cmd_eval(config: Config):
+def cmd_eval(config: Config, eval_output: str = ""):
     """Run evaluation on sample queries."""
     embedder, retriever, generator = build_pipeline(config)
 
@@ -147,16 +147,28 @@ def cmd_eval(config: Config):
     for k, v in stats.items():
         logger.info("  %s: %s", k, v)
 
+    final_results = {"simple": stats}
+
     try:
         from evaluate import evaluate_ragas
         logger.info("RAGAS evaluation:")
         ragas_results = evaluate_ragas(samples)
         for k, v in ragas_results.items():
             logger.info("  %s: %s", k, f"{v:.4f}" if isinstance(v, float) else v)
+        final_results["ragas"] = ragas_results
     except ImportError:
         logger.warning("RAGAS not installed. Run: pip install ragas")
     except Exception as e:
         logger.error("RAGAS error: %s", e)
+
+    if eval_output:
+        import json
+        try:
+            with open(eval_output, "w") as f:
+                json.dump(final_results, f, indent=2)
+            logger.info("Saved evaluation results to %s", eval_output)
+        except Exception as e:
+            logger.error("Failed to save evaluation results: %s", e)
 
 
 def cmd_demo(config: Config):
@@ -200,6 +212,7 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
+    parser.add_argument("--eval-output", default="eval_results.json", help="Path to save evaluation results JSON")
     # Local mode
     parser.add_argument("--local", action="store_true", help="Use local embedder + GGUF (no API needed)")
     parser.add_argument("--local-embed-model", default="paraphrase-multilingual-MiniLM-L12-v2")
@@ -248,7 +261,7 @@ def main():
                 sys.exit(1)
             cmd_query(config, args.query_text)
         elif args.command == "eval":
-            cmd_eval(config)
+            cmd_eval(config, getattr(args, "eval_output", "eval_results.json"))
         elif args.command == "demo":
             cmd_demo(config)
     except KeyboardInterrupt:
