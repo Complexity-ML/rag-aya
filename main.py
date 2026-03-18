@@ -20,7 +20,7 @@ load_dotenv()
 from config import Config
 from chunker import chunk_documents
 from evaluate import EvalSample, evaluate_simple
-from pipeline import build_pipeline, build_embedder, build_retriever
+from pipeline import build_pipeline, build_embedder, build_retriever, build_tokenizer
 from logger import init_logger
 
 logger = init_logger(__name__)
@@ -53,7 +53,22 @@ def cmd_index(config: Config, lang_pair: str, dataset: str = None):
         return
 
     logger.info("Chunking %d documents...", len(documents))
-    chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
+
+    # Use token-based chunking if enabled
+    tokenizer = build_tokenizer(config, embedder) if config.use_token_chunking else None
+    if tokenizer:
+        logger.info("Using token-based chunking (size=%d, overlap=%d)", config.token_chunk_size, config.token_overlap)
+        chunks = chunk_documents(
+            documents,
+            chunk_size=config.token_chunk_size,
+            overlap=config.token_overlap,
+            tokenizer=tokenizer,
+            token_limit=embedder.get_token_limit() if config.warn_on_truncation else None,
+        )
+    else:
+        logger.info("Using character-based chunking (size=%d, overlap=%d)", config.chunk_size, config.chunk_overlap)
+        chunks = chunk_documents(documents, config.chunk_size, config.chunk_overlap)
+
     logger.info("%d chunks created", len(chunks))
 
     logger.info("Embedding + indexing...")
@@ -210,6 +225,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--max-docs", type=int, default=50)
     parser.add_argument("--chunk-size", type=int, default=512)
+    parser.add_argument("--token-chunking", action="store_true", help="Use token-based chunking instead of character-based")
+    parser.add_argument("--token-chunk-size", type=int, default=300, help="Token chunk size (default: 300)")
     parser.add_argument("--index-path", default="index/")
     parser.add_argument("--model", default="c4ai-aya-23-8b")
     parser.add_argument("--eval-output", default="eval_results.json", help="Path to save evaluation results JSON")
@@ -250,6 +267,8 @@ def main():
         wmt_max_lines=args.wmt_max_lines,
         local_embedder=args.local,
         local_embed_model=args.local_embed_model,
+        use_token_chunking=args.token_chunking,
+        token_chunk_size=args.token_chunk_size,
     )
 
     try:

@@ -27,7 +27,7 @@ load_dotenv()
 from config import Config
 from chunker import chunk_documents
 from evaluate import EvalSample, evaluate_simple
-from pipeline import build_embedder, build_generator, build_retriever
+from pipeline import build_embedder, build_generator, build_retriever, build_tokenizer
 from logger import init_logger
 
 logger = init_logger(__name__)
@@ -88,11 +88,22 @@ class RagAyaServer:
                 status=400,
             )
 
-        chunks = chunk_documents(
-            documents,
-            self.config.chunk_size,
-            self.config.chunk_overlap,
-        )
+        # Use token-based chunking if enabled
+        if self.config.use_token_chunking:
+            tokenizer = build_tokenizer(self.config, self.embedder)
+            chunks = chunk_documents(
+                documents,
+                chunk_size=self.config.token_chunk_size,
+                overlap=self.config.token_overlap,
+                tokenizer=tokenizer,
+                token_limit=self.embedder.get_token_limit() if self.config.warn_on_truncation else None,
+            )
+        else:
+            chunks = chunk_documents(
+                documents,
+                self.config.chunk_size,
+                self.config.chunk_overlap,
+            )
 
         await self._run_in_pool(self.retriever.index, chunks)
         await self._run_in_pool(self.retriever.save, self.config.index_path)

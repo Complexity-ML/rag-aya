@@ -6,7 +6,7 @@ Cohere API + pipeline settings.
 
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -16,9 +16,16 @@ class Config:
     embed_model: str = "embed-multilingual-v3.0"
     gen_model: str = "c4ai-aya-23-8b"
 
-    # Chunking
+    # Character-based chunking (legacy, default mode)
     chunk_size: int = 512
     chunk_overlap: int = 64
+
+    # Token-based chunking (opt-in)
+    use_token_chunking: bool = False
+    token_chunk_size: int = 300
+    token_overlap: int = 50
+    warn_on_truncation: bool = True
+    embedder_token_limit: Optional[int] = None
 
     # Retrieval
     top_k: int = 5

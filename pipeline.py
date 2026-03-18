@@ -4,6 +4,7 @@ RAG-Aya :: Pipeline Factory
 Shared backend selection logic for main.py and server.py.
 """
 
+from typing import Optional
 from config import Config
 from retriever import Retriever
 from logger import init_logger
@@ -38,6 +39,22 @@ def build_retriever(config: Config, embedder=None):
     if embedder is None:
         embedder = build_embedder(config)
     return Retriever(embedder, cache_size=config.cache_size)
+
+
+def build_tokenizer(config: Config, embedder=None) -> Optional:
+    """
+    Build tokenizer if token chunking is enabled.
+
+    Returns:
+        Tokenizer instance if use_token_chunking=True, else None
+    """
+    if not config.use_token_chunking:
+        return None
+
+    if embedder is None:
+        embedder = build_embedder(config)
+
+    return embedder.get_tokenizer()
 
 
 def build_pipeline(config: Config):
