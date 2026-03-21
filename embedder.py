@@ -46,6 +46,15 @@ class CohereEmbedder:
         self.dimension = result.shape[1]
         return result
 
+    def get_tokenizer(self):
+        """Return tokenizer for this embedder."""
+        from tokenizer_factory import CohereTokenizer
+        return CohereTokenizer(self.client)
+
+    def get_token_limit(self) -> int:
+        """Max safe tokens for embed-multilingual-v3.0."""
+        return 8000
+
 
 class LocalEmbedder:
     """Local embedder via sentence-transformers. No API key needed."""
@@ -63,3 +72,12 @@ class LocalEmbedder:
 
     def embed_query(self, query: str) -> np.ndarray:
         return self.st_model.encode([query]).astype(np.float32)
+
+    def get_tokenizer(self):
+        """Return tokenizer for this embedder."""
+        from tokenizer_factory import LocalTokenizer
+        return LocalTokenizer(self.st_model.tokenizer)
+
+    def get_token_limit(self) -> int:
+        """Max safe tokens for MiniLM-L12-v2."""
+        return 480
