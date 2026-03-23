@@ -27,9 +27,10 @@ def evaluate_ragas(samples: List[EvalSample]) -> dict:
         "contexts": [s.contexts for s in samples],
         "answer": [s.answer for s in samples],
     }
-    # Add ground_truth if available (needed for context_recall)
+    # RAGAS context_precision requires "reference" column
     has_gt = all(s.ground_truth is not None for s in samples)
     if has_gt:
+        data["reference"] = [s.ground_truth for s in samples]
         data["ground_truth"] = [s.ground_truth for s in samples]
 
     dataset = Dataset.from_dict(data)

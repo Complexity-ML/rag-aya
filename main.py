@@ -137,15 +137,20 @@ def cmd_eval(config: Config, eval_output: str = ""):
         return
 
     test_queries = [
-        ("What is machine learning?", "en"),
-        ("Qu'est-ce que l'intelligence artificielle ?", "fr"),
-        ("What are neural networks?", "en"),
-        ("Comment fonctionne le traitement du langage naturel ?", "fr"),
-        ("What is deep learning used for?", "en"),
+        ("What is machine learning?", "en",
+         "Machine learning is a branch of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed."),
+        ("Qu'est-ce que l'intelligence artificielle ?", "fr",
+         "L'intelligence artificielle est un domaine de l'informatique qui vise à créer des systèmes capables de simuler l'intelligence humaine."),
+        ("What are neural networks?", "en",
+         "Neural networks are computational models inspired by the structure of the human brain, consisting of interconnected nodes that process information."),
+        ("Comment fonctionne le traitement du langage naturel ?", "fr",
+         "Le traitement du langage naturel est une branche de l'IA qui permet aux ordinateurs de comprendre, interpréter et générer du langage humain."),
+        ("What is deep learning used for?", "en",
+         "Deep learning is used for image recognition, natural language processing, speech recognition, and many other complex pattern recognition tasks."),
     ]
 
     samples = []
-    for query, lang in test_queries:
+    for query, lang, reference in test_queries:
         logger.info("[%s] %s", lang, query)
         context = retriever.get_context(query, k=config.top_k)
         contexts_list = [c.strip() for c in context.split("\n\n") if c.strip()]
@@ -155,6 +160,7 @@ def cmd_eval(config: Config, eval_output: str = ""):
             question=query,
             contexts=contexts_list,
             answer=result.answer,
+            ground_truth=reference,
         ))
 
     logger.info("Evaluation results (simple):")
